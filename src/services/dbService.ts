@@ -80,27 +80,30 @@ export class CloudDatabaseService {
    */
   public static getSupabaseSchemaSQL(): string {
     return `-- Schema CSDL TinTucFast cho Supabase / PostgreSQL
-CREATE TABLE IF NOT EXISTS articles (
-  id TEXT PRIMARY KEY,
-  slug TEXT UNIQUE NOT NULL,
-  title TEXT NOT NULL,
-  summary TEXT NOT NULL,
-  content TEXT NOT NULL,
-  category TEXT NOT NULL,
-  cover_url TEXT NOT NULL,
-  author JSONB NOT NULL,
-  published_at TIMESTAMPTZ DEFAULT NOW(),
-  read_time_minutes INT DEFAULT 3,
-  views INT DEFAULT 0,
-  likes INT DEFAULT 0,
-  tags TEXT[] DEFAULT '{}',
-  comments_count INT DEFAULT 0,
-  comments JSONB DEFAULT '[]'::jsonb
+DROP TABLE IF EXISTS public.articles CASCADE;
+
+CREATE TABLE public.articles (
+  "id" TEXT PRIMARY KEY,
+  "slug" TEXT UNIQUE NOT NULL,
+  "title" TEXT NOT NULL,
+  "summary" TEXT NOT NULL,
+  "content" TEXT NOT NULL,
+  "category" TEXT NOT NULL,
+  "coverUrl" TEXT NOT NULL,
+  "author" JSONB NOT NULL,
+  "publishedAt" TIMESTAMPTZ DEFAULT NOW(),
+  "readTimeMinutes" INT DEFAULT 3,
+  "views" INT DEFAULT 0,
+  "likes" INT DEFAULT 0,
+  "isFeatured" BOOLEAN DEFAULT FALSE,
+  "status" TEXT DEFAULT 'published',
+  "tags" TEXT[] DEFAULT '{}',
+  "commentsCount" INT DEFAULT 0,
+  "comments" JSONB DEFAULT '[]'::jsonb
 );
 
--- Index tối ưu tốc độ truy vấn bài viết mới nhất
-CREATE INDEX IF NOT EXISTS idx_articles_published_at ON articles(published_at DESC);
-CREATE INDEX IF NOT EXISTS idx_articles_category ON articles(category);
+CREATE INDEX IF NOT EXISTS idx_articles_published_at ON public.articles("publishedAt" DESC);
+CREATE INDEX IF NOT EXISTS idx_articles_category ON public.articles("category");
 `;
   }
 }

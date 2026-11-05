@@ -222,37 +222,42 @@ export function getSupabaseSQLMigrationScript(): string {
 -- Sao chép toàn bộ đoạn này dán vào: Supabase Dashboard -> SQL Editor -> Run
 -- ======================================================
 
-CREATE TABLE IF NOT EXISTS public.articles (
-  id TEXT PRIMARY KEY,
-  slug TEXT UNIQUE NOT NULL,
-  title TEXT NOT NULL,
-  summary TEXT NOT NULL,
-  content TEXT NOT NULL,
-  category TEXT NOT NULL,
-  coverUrl TEXT NOT NULL,
-  author JSONB NOT NULL,
-  publishedAt TIMESTAMPTZ DEFAULT NOW(),
-  readTimeMinutes INT DEFAULT 3,
-  views INT DEFAULT 0,
-  likes INT DEFAULT 0,
-  isFeatured BOOLEAN DEFAULT FALSE,
-  status TEXT DEFAULT 'published',
-  tags TEXT[] DEFAULT '{}',
-  commentsCount INT DEFAULT 0,
-  comments JSONB DEFAULT '[]'::jsonb
+-- Xóa bảng cũ nếu đã tồn tại để cập nhật chuẩn cấu trúc cột mới
+DROP TABLE IF EXISTS public.articles CASCADE;
+
+CREATE TABLE public.articles (
+  "id" TEXT PRIMARY KEY,
+  "slug" TEXT UNIQUE NOT NULL,
+  "title" TEXT NOT NULL,
+  "summary" TEXT NOT NULL,
+  "content" TEXT NOT NULL,
+  "category" TEXT NOT NULL,
+  "coverUrl" TEXT NOT NULL,
+  "author" JSONB NOT NULL,
+  "publishedAt" TIMESTAMPTZ DEFAULT NOW(),
+  "readTimeMinutes" INT DEFAULT 3,
+  "views" INT DEFAULT 0,
+  "likes" INT DEFAULT 0,
+  "isFeatured" BOOLEAN DEFAULT FALSE,
+  "status" TEXT DEFAULT 'published',
+  "tags" TEXT[] DEFAULT '{}',
+  "commentsCount" INT DEFAULT 0,
+  "comments" JSONB DEFAULT '[]'::jsonb
 );
 
 -- Tối ưu tốc độ truy vấn bài viết mới nhất
 CREATE INDEX IF NOT EXISTS idx_articles_published_at ON public.articles("publishedAt" DESC);
-CREATE INDEX IF NOT EXISTS idx_articles_category ON public.articles(category);
+CREATE INDEX IF NOT EXISTS idx_articles_category ON public.articles("category");
 
 -- Bật tính năng truy cập công khai (Row Level Security - RLS) cho phép đọc và ghi dữ liệu
 ALTER TABLE public.articles ENABLE ROW LEVEL SECURITY;
 
+DROP POLICY IF EXISTS "Cho phép đọc bài viết công khai" ON public.articles;
 CREATE POLICY "Cho phép đọc bài viết công khai" 
   ON public.articles FOR SELECT 
   USING (true);
 
+DROP POLICY IF EXISTS "Cho phép thêm và sửa bài viết" ON public.articles;
 CREATE POLICY "Cho phép thêm và sửa bài viết" 
   ON public.articles FOR ALL 
   USING (true) 
