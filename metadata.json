@@ -1,0 +1,6 @@
+{
+  "name": "TinTucFast - Trang Tin Tức Tối Giản, Siêu Nhanh & Bảo Mật",
+  "description": "Trang tin tức tối giản siêu tốc độ, tối ưu di động, hỗ trợ Dark Mode, bảo mật chống DDoS, rate limiting và chặn AI Bot crawler.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
