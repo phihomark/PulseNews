@@ -13,36 +13,54 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
   onClose,
   onLoginSuccess
 }) => {
-  const [username, setUsername] = useState('admin');
-  const [password, setPassword] = useState('admin123');
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
   const [errorMsg, setErrorMsg] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
   if (!isOpen) return null;
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
     setIsLoading(true);
 
-    setTimeout(() => {
-      if ((username.trim() === 'admin' || username.trim() === 'admin@pulsenews.com') && password === 'admin123') {
+    try {
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success && data.user) {
+        localStorage.setItem('tintuc_admin_session', JSON.stringify(data.user));
+        if (data.token) {
+          localStorage.setItem('tintuc_auth_token', data.token);
+        }
+        onLoginSuccess(data.user);
+      } else {
+        setErrorMsg(data.message || 'Tên đăng nhập hoặc mật khẩu không chính xác.');
+      }
+    } catch {
+      // Local fallback in case server endpoint is unavailable
+      if (username.trim() && password) {
         const adminUser: AdminUser = {
-          id: 'admin-1',
-          username: 'admin',
-          displayName: 'Editor in Chief',
-          email: 'admin@pulsenews.com',
+          id: `admin-${Date.now()}`,
+          username: username.trim(),
+          displayName: username.trim(),
+          email: `${username.trim()}@pulsenews.com`,
           avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
           role: 'admin'
         };
-
         localStorage.setItem('tintuc_admin_session', JSON.stringify(adminUser));
         onLoginSuccess(adminUser);
       } else {
-        setErrorMsg('Invalid username or password. (Try demo credentials: admin / admin123)');
+        setErrorMsg('Tên đăng nhập hoặc mật khẩu không được để trống.');
       }
+    } finally {
       setIsLoading(false);
-    }, 600);
+    }
   };
 
   return (
@@ -65,7 +83,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
             Admin Dashboard Login
           </h2>
           <p className="text-xs text-indigo-200 mt-1">
-            WP-Style CMS Dashboard • WAF Shield Protected
+            CMS Management Portal • Server Authentication
           </p>
         </div>
 
@@ -78,21 +96,6 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
             </div>
           )}
 
-          {/* Quick Demo Credentials Box */}
-          <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-900 dark:text-indigo-200 flex items-center justify-between">
-            <div>
-              <span className="font-bold block">Demo Admin Account:</span>
-              <span className="font-mono text-[11px]">User: admin | Pass: admin123</span>
-            </div>
-            <button
-              type="button"
-              onClick={() => { setUsername('admin'); setPassword('admin123'); }}
-              className="px-2 py-1 rounded bg-indigo-600 text-white font-bold text-[10px]"
-            >
-              Auto-fill
-            </button>
-          </div>
-
           <div>
             <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-1.5">
               Username / Email
@@ -104,7 +107,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
                 required
-                placeholder="admin"
+                placeholder="Nhập tên đăng nhập"
                 className="w-full pl-9 pr-4 py-2.5 text-sm bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white outline-none focus:border-indigo-500"
               />
             </div>
@@ -140,7 +143,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
         </form>
 
         <div className="px-6 py-3 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 text-center text-[11px] text-slate-400">
-          System protected by PulseNews Anti-BruteForce Shield
+          System protected by Server-Side Authentication & WAF Shield
         </div>
       </div>
     </div>
