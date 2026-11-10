@@ -311,36 +311,6 @@ app.post('/api/ai/proofread', async (req: Request, res: Response) => {
   return res.json({ title, content });
 });
 
-app.post('/api/auth/login', (req: Request, res: Response) => {
-  const { username, password } = req.body;
-  const adminUsername = process.env.ADMIN_USERNAME || 'admin';
-  const adminPassword = process.env.ADMIN_PASSWORD || 'admin123';
-
-  if (
-    (username === adminUsername || username === `${adminUsername}@pulsenews.com` || username === 'admin@pulsenews.com') &&
-    password === adminPassword
-  ) {
-    const token = `auth_token_${Date.now()}_${Math.random().toString(36).substring(2)}`;
-    return res.json({
-      success: true,
-      token,
-      user: {
-        id: 'admin-1',
-        username: adminUsername,
-        displayName: 'Administrator',
-        email: 'admin@pulsenews.com',
-        avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=200&q=80',
-        role: 'admin'
-      }
-    });
-  }
-
-  return res.status(401).json({
-    success: false,
-    message: 'Invalid username or password'
-  });
-});
-
 app.get('/api/security/stats', (req: Request, res: Response) => {
   securityStats.lastUpdated = new Date().toISOString();
   securityStats.activeRulesCount = Object.values(aiBotUserAgents).filter(Boolean).length;

@@ -15,11 +15,13 @@ import { PerformanceWidget } from './components/PerformanceWidget';
 import { INITIAL_ARTICLES } from './data/initialArticles';
 import { Article, ArticleCategory, AdminUser } from './types';
 import { 
+  getSupabaseClient,
   fetchArticlesFromSupabase, 
   insertArticleToSupabase, 
   updateArticleInSupabase, 
   deleteArticleFromSupabase 
 } from './services/supabaseService';
+import { syncAuthenticatedGmailUser } from './services/userService';
 import { getSiteSettings, SiteSettings } from './services/siteSettingsService';
 import { Flame, Sparkles, ShieldCheck, Newspaper, AlertCircle, ArrowUpRight } from 'lucide-react';
 
@@ -125,6 +127,73 @@ export default function AppContent() {
     loadFromSupabase();
   }, []);
 
+  // Listen to Supabase Auth (Gmail Confirmation Link / Google OAuth redirect / Active Session)
+  useEffect(() => {
+    const supabase = getSupabaseClient();
+    if (!supabase) return;
+
+    const handleSessionUser = async (sessionUser: any, isRedirectEvent: boolean) => {
+      if (!sessionUser?.email) return;
+      const { user: managedUser, isSuspended } = await syncAuthenticatedGmailUser({
+        id: sessionUser.id,
+        email: sessionUser.email,
+        displayName:
+          sessionUser.user_metadata?.full_name ||
+          sessionUser.user_metadata?.name ||
+          sessionUser.email.split('@')[0],
+        avatar: sessionUser.user_metadata?.avatar_url
+      });
+
+      if (isSuspended) {
+        await supabase.auth.signOut();
+        localStorage.removeItem('tintuc_admin_session');
+        setAdminUser(null);
+        setIsAdminDashboardView(false);
+        return;
+      }
+
+      const syncedAdmin: AdminUser = {
+        id: managedUser.id,
+        username: managedUser.username,
+        displayName: managedUser.displayName,
+        email: managedUser.email,
+        avatar: managedUser.avatar,
+        role: managedUser.role,
+        status: managedUser.status,
+        permissions: managedUser.permissions
+      };
+
+      localStorage.setItem('tintuc_admin_session', JSON.stringify(syncedAdmin));
+      setAdminUser(syncedAdmin);
+
+      if (isRedirectEvent || window.location.pathname === '/admin') {
+        setIsAdminLoginOpen(false);
+        setIsAdminDashboardView(true);
+      }
+    };
+
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session?.user) {
+        const hasAuthHash = window.location.hash.includes('access_token=');
+        handleSessionUser(session.user, hasAuthHash);
+      }
+    });
+
+    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        handleSessionUser(session.user, true);
+      } else if (event === 'SIGNED_OUT') {
+        localStorage.removeItem('tintuc_admin_session');
+        setAdminUser(null);
+        setIsAdminDashboardView(false);
+      }
+    });
+
+    return () => {
+      authListener.subscription.unsubscribe();
+    };
+  }, []);
+
   // Save articles to LocalStorage whenever modified
   useEffect(() => {
     localStorage.setItem('tintuc_articles_v3', JSON.stringify(articles));
@@ -140,7 +209,9 @@ export default function AppContent() {
   useEffect(() => {
     const parseUrlRoute = () => {
       const path = window.location.pathname.replace(/^\//, '');
-      const hash = window.location.hash.replace(/^#\/?/, '');
+      const rawHash = window.location.hash.replace(/^#\/?/, '');
+      // Ignore Supabase Auth callback hash tokens (access_token, error_description, etc.)
+      const hash = rawHash.startsWith('access_token=') || rawHash.startsWith('error=') ? '' : rawHash;
       const route = path || hash;
 
       if (!route) {
@@ -223,8 +294,13 @@ export default function AppContent() {
     navigateTo('/admin');
   };
 
-  const handleAdminLogout = () => {
+  const handleAdminLogout = async () => {
+    const supabase = getSupabaseClient();
+    if (supabase) {
+      await supabase.auth.signOut();
+    }
     localStorage.removeItem('tintuc_admin_session');
+    localStorage.removeItem('tintuc_auth_token');
     setAdminUser(null);
     setIsAdminDashboardView(false);
     navigateTo('/');

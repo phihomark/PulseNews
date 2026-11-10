@@ -61,7 +61,9 @@ export interface AdminUser {
   displayName: string;
   email: string;
   avatar: string;
-  role: 'admin' | 'editor' | 'super_admin';
+  role: 'super_admin' | 'admin' | 'editor' | 'author' | 'contributor';
+  status?: 'active' | 'suspended';
+  permissions?: UserPermissions;
 }
 
 export interface SecurityStats {

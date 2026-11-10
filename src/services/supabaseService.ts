@@ -262,5 +262,30 @@ CREATE POLICY "Cho phép thêm và sửa bài viết"
   ON public.articles FOR ALL 
   USING (true) 
   WITH CHECK (true);
+
+-- ======================================================
+-- BẢNG QUẢN LÝ NHÂN SỰ & PHÂN QUYỀN GMAIL (managed_users)
+-- ======================================================
+CREATE TABLE IF NOT EXISTS public.managed_users (
+  "id" TEXT PRIMARY KEY,
+  "username" TEXT NOT NULL,
+  "displayName" TEXT NOT NULL,
+  "email" TEXT UNIQUE NOT NULL,
+  "avatar" TEXT DEFAULT '',
+  "role" TEXT DEFAULT 'editor',
+  "status" TEXT DEFAULT 'active',
+  "createdAt" TIMESTAMPTZ DEFAULT NOW(),
+  "permissions" JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+
+CREATE INDEX IF NOT EXISTS idx_managed_users_email ON public.managed_users("email");
+
+ALTER TABLE public.managed_users ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "Cho phép truy cập bảng managed_users cho người dùng đã xác thực" ON public.managed_users;
+CREATE POLICY "Cho phép truy cập bảng managed_users cho người dùng đã xác thực"
+  ON public.managed_users FOR ALL
+  USING (true)
+  WITH CHECK (true);
 `;
 }

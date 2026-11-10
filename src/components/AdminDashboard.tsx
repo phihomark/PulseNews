@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   LayoutDashboard, 
   FileText, 
@@ -40,6 +40,8 @@ import {
   updateUser, 
   deleteUser, 
   togglePermission, 
+  fetchUsersFromSupabase,
+  syncAuthenticatedGmailUser,
   DEFAULT_PERMISSIONS 
 } from '../services/userService';
 
@@ -88,6 +90,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [editingManagedUser, setEditingManagedUser] = useState<ManagedUser | null>(null);
   const [userToDelete, setUserToDelete] = useState<ManagedUser | null>(null);
   const [userSuccessMsg, setUserSuccessMsg] = useState('');
+
+  // Sync users list from Supabase & ensure current logged-in Gmail user is registered in list
+  useEffect(() => {
+    const syncUsers = async () => {
+      if (user?.email) {
+        await syncAuthenticatedGmailUser({
+          id: user.id,
+          email: user.email,
+          displayName: user.displayName,
+          avatar: user.avatar
+        });
+      }
+      const remote = await fetchUsersFromSupabase();
+      if (remote && remote.length > 0) {
+        setManagedUsers(remote);
+      } else {
+        setManagedUsers(getAllUsers());
+      }
+    };
+    syncUsers();
+  }, [user]);
 
   const [userForm, setUserForm] = useState<{
     displayName: string;
