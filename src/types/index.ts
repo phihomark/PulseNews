@@ -50,7 +50,8 @@ export interface ManagedUser {
   email: string;
   avatar: string;
   role: 'super_admin' | 'admin' | 'editor' | 'author' | 'contributor';
-  status: 'active' | 'suspended';
+  status: 'active' | 'pending' | 'suspended';
+  emailVerified?: boolean;
   createdAt: string;
   permissions: UserPermissions;
 }
@@ -62,7 +63,8 @@ export interface AdminUser {
   email: string;
   avatar: string;
   role: 'super_admin' | 'admin' | 'editor' | 'author' | 'contributor';
-  status?: 'active' | 'suspended';
+  status?: 'active' | 'pending' | 'suspended';
+  emailVerified?: boolean;
   permissions?: UserPermissions;
 }
 

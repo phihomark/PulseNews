@@ -2,9 +2,10 @@ import { ManagedUser, UserPermissions } from '../types';
 import { getSupabaseClient } from './supabaseService';
 
 const USERS_STORAGE_KEY = 'tintuc_managed_users_v1';
+const UNVERIFIED_EMAILS_KEY = 'tintuc_unverified_gmail_map';
 
 // Primary Super Admin Gmail (owner account)
-const PRIMARY_SUPER_ADMIN_EMAILS = ['honguyen6492@gmail.com'];
+export const PRIMARY_SUPER_ADMIN_EMAILS = ['honguyen6492@gmail.com'];
 
 export const DEFAULT_PERMISSIONS: Record<ManagedUser['role'], UserPermissions> = {
   super_admin: {
@@ -50,6 +51,42 @@ export const DEFAULT_PERMISSIONS: Record<ManagedUser['role'], UserPermissions> =
 };
 
 export const INITIAL_USERS: ManagedUser[] = [];
+
+/**
+ * Tracks emails that have registered but have NOT yet completed Gmail OTP / Link verification
+ */
+export function markEmailPendingOtpVerification(email: string): void {
+  try {
+    const clean = email.trim().toLowerCase();
+    const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
+    const map: Record<string, boolean> = raw ? JSON.parse(raw) : {};
+    map[clean] = true;
+    localStorage.setItem(UNVERIFIED_EMAILS_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+export function markEmailOtpVerified(email: string): void {
+  try {
+    const clean = email.trim().toLowerCase();
+    const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
+    if (!raw) return;
+    const map: Record<string, boolean> = JSON.parse(raw);
+    delete map[clean];
+    localStorage.setItem(UNVERIFIED_EMAILS_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+export function isEmailPendingOtpVerification(email: string): boolean {
+  try {
+    const clean = email.trim().toLowerCase();
+    const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
+    if (!raw) return false;
+    const map: Record<string, boolean> = JSON.parse(raw);
+    return Boolean(map[clean]);
+  } catch {
+    return false;
+  }
+}
 
 export function getAllUsers(): ManagedUser[] {
   try {
@@ -136,14 +173,14 @@ export async function deleteUserFromSupabase(id: string): Promise<boolean> {
 }
 
 /**
- * Syncs an authenticated Gmail user (via Supabase Auth / Google OAuth) with `managed_users`
+ * Syncs a verified Gmail user (after OTP / Email Link / Google OAuth verification) with `managed_users`
  */
 export async function syncAuthenticatedGmailUser(params: {
   id: string;
   email: string;
   displayName?: string;
   avatar?: string;
-}): Promise<{ user: ManagedUser; isSuspended: boolean }> {
+}): Promise<{ user: ManagedUser; isSuspended: boolean; isPendingApproval: boolean }> {
   const cleanEmail = params.email.trim().toLowerCase();
   const emailPrefix = cleanEmail.split('@')[0] || 'user';
   const defaultAvatar =
@@ -154,15 +191,17 @@ export async function syncAuthenticatedGmailUser(params: {
   const remoteUsers = await fetchUsersFromSupabase();
   const currentUsers = remoteUsers && remoteUsers.length > 0 ? remoteUsers : getAllUsers();
 
-  // 2. Check if this Gmail already exists in managed_users (e.g., pre-added by Admin or returning user)
+  const isPrimarySuperAdmin = PRIMARY_SUPER_ADMIN_EMAILS.includes(cleanEmail);
+
+  // 2. Check if this Gmail already exists in managed_users
   const existing = currentUsers.find(u => u.email.trim().toLowerCase() === cleanEmail);
 
   if (existing) {
-    const isPrimarySuperAdmin = PRIMARY_SUPER_ADMIN_EMAILS.includes(cleanEmail);
     const updatedUser: ManagedUser = {
       ...existing,
       displayName: existing.displayName || params.displayName || emailPrefix,
       avatar: existing.avatar || defaultAvatar,
+      emailVerified: true,
       role: isPrimarySuperAdmin ? 'super_admin' : existing.role,
       status: isPrimarySuperAdmin ? 'active' : existing.status,
       permissions: isPrimarySuperAdmin
@@ -174,18 +213,20 @@ export async function syncAuthenticatedGmailUser(params: {
       u.email.trim().toLowerCase() === cleanEmail ? updatedUser : u
     );
     saveAllUsers(nextList);
-    upsertUserToSupabase(updatedUser);
+    await upsertUserToSupabase(updatedUser);
 
     return {
       user: updatedUser,
       isSuspended: updatedUser.status === 'suspended',
+      isPendingApproval: updatedUser.status === 'pending',
     };
   }
 
-  // 3. New Gmail account registering/signing in for the first time
-  const isFirstOrOwner =
-    currentUsers.length === 0 || PRIMARY_SUPER_ADMIN_EMAILS.includes(cleanEmail);
-  const initialRole: ManagedUser['role'] = isFirstOrOwner ? 'super_admin' : 'editor';
+  // 3. New Gmail account registering for the first time
+  // Only the primary owner Gmail becomes 'active' super_admin automatically;
+  // other self-registered accounts start as 'pending' until approved by an Admin in User Management.
+  const initialRole: ManagedUser['role'] = isPrimarySuperAdmin ? 'super_admin' : 'contributor';
+  const initialStatus: ManagedUser['status'] = isPrimarySuperAdmin ? 'active' : 'pending';
 
   const newUser: ManagedUser = {
     id: params.id || `user-${Date.now()}`,
@@ -194,18 +235,20 @@ export async function syncAuthenticatedGmailUser(params: {
     email: cleanEmail,
     avatar: defaultAvatar,
     role: initialRole,
-    status: 'active',
+    status: initialStatus,
+    emailVerified: true,
     createdAt: new Date().toISOString(),
     permissions: { ...DEFAULT_PERMISSIONS[initialRole] },
   };
 
   const updatedList = [newUser, ...currentUsers];
   saveAllUsers(updatedList);
-  upsertUserToSupabase(newUser);
+  await upsertUserToSupabase(newUser);
 
   return {
     user: newUser,
     isSuspended: false,
+    isPendingApproval: initialStatus === 'pending',
   };
 }
 

@@ -21,7 +21,11 @@ import {
   updateArticleInSupabase, 
   deleteArticleFromSupabase 
 } from './services/supabaseService';
-import { syncAuthenticatedGmailUser } from './services/userService';
+import {
+  syncAuthenticatedGmailUser,
+  isEmailPendingOtpVerification,
+  markEmailOtpVerified
+} from './services/userService';
 import { getSiteSettings, SiteSettings } from './services/siteSettingsService';
 import { Flame, Sparkles, ShieldCheck, Newspaper, AlertCircle, ArrowUpRight } from 'lucide-react';
 
@@ -42,7 +46,11 @@ export default function AppContent() {
     const saved = localStorage.getItem('tintuc_admin_session');
     if (saved) {
       try {
-        return JSON.parse(saved);
+        const parsed = JSON.parse(saved);
+        if (parsed?.status === 'pending' || parsed?.status === 'suspended') {
+          return null;
+        }
+        return parsed;
       } catch {}
     }
     return null;
@@ -132,19 +140,37 @@ export default function AppContent() {
     const supabase = getSupabaseClient();
     if (!supabase) return;
 
-    const handleSessionUser = async (sessionUser: any, isRedirectEvent: boolean) => {
+    const handleSessionUser = async (sessionUser: any, isRedirectCallback: boolean) => {
+      // Never hijack form flows (e.g., signUp / signInWithPassword inside AdminLogin)
+      if (sessionStorage.getItem('suppress_auto_auth_listener') === 'true') {
+        return;
+      }
       if (!sessionUser?.email) return;
-      const { user: managedUser, isSuspended } = await syncAuthenticatedGmailUser({
-        id: sessionUser.id,
-        email: sessionUser.email,
-        displayName:
-          sessionUser.user_metadata?.full_name ||
-          sessionUser.user_metadata?.name ||
-          sessionUser.email.split('@')[0],
-        avatar: sessionUser.user_metadata?.avatar_url
-      });
 
-      if (isSuspended) {
+      const cleanEmail = sessionUser.email.trim().toLowerCase();
+
+      // If arriving from a real Gmail confirmation link (#access_token=...) or Google OAuth, mark verified
+      if (isRedirectCallback || sessionUser.app_metadata?.provider === 'google') {
+        markEmailOtpVerified(cleanEmail);
+      }
+
+      // If email is still awaiting OTP verification, do NOT auto-login
+      if (isEmailPendingOtpVerification(cleanEmail)) {
+        return;
+      }
+
+      const { user: managedUser, isSuspended, isPendingApproval } =
+        await syncAuthenticatedGmailUser({
+          id: sessionUser.id,
+          email: cleanEmail,
+          displayName:
+            sessionUser.user_metadata?.full_name ||
+            sessionUser.user_metadata?.name ||
+            cleanEmail.split('@')[0],
+          avatar: sessionUser.user_metadata?.avatar_url
+        });
+
+      if (isSuspended || isPendingApproval) {
         await supabase.auth.signOut();
         localStorage.removeItem('tintuc_admin_session');
         setAdminUser(null);
@@ -160,28 +186,37 @@ export default function AppContent() {
         avatar: managedUser.avatar,
         role: managedUser.role,
         status: managedUser.status,
+        emailVerified: true,
         permissions: managedUser.permissions
       };
 
       localStorage.setItem('tintuc_admin_session', JSON.stringify(syncedAdmin));
       setAdminUser(syncedAdmin);
 
-      if (isRedirectEvent || window.location.pathname === '/admin') {
+      if (isRedirectCallback || window.location.pathname === '/admin') {
         setIsAdminLoginOpen(false);
         setIsAdminDashboardView(true);
       }
     };
 
+    const hasAuthHashOnBoot = window.location.hash.includes('access_token=');
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (session?.user) {
-        const hasAuthHash = window.location.hash.includes('access_token=');
-        handleSessionUser(session.user, hasAuthHash);
+        handleSessionUser(session.user, hasAuthHashOnBoot);
       }
     });
 
     const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (sessionStorage.getItem('suppress_auto_auth_listener') === 'true') {
+        return;
+      }
       if (event === 'SIGNED_IN' && session?.user) {
-        handleSessionUser(session.user, true);
+        const isCallback =
+          window.location.hash.includes('access_token=') ||
+          session.user.app_metadata?.provider === 'google';
+        if (isCallback) {
+          handleSessionUser(session.user, true);
+        }
       } else if (event === 'SIGNED_OUT') {
         localStorage.removeItem('tintuc_admin_session');
         setAdminUser(null);

@@ -117,7 +117,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     username: string;
     email: string;
     role: ManagedUser['role'];
-    status: 'active' | 'suspended';
+    status: 'active' | 'pending' | 'suspended';
     avatar: string;
     permissions: UserPermissions;
   }>({
@@ -971,20 +971,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             <button
                               type="button"
                               onClick={() => {
-                                const updated = updateUser(u.id, { status: u.status === 'active' ? 'suspended' : 'active' });
+                                const nextStatus =
+                                  u.status === 'pending'
+                                    ? 'active'
+                                    : u.status === 'active'
+                                    ? 'suspended'
+                                    : 'active';
+                                const updated = updateUser(u.id, { status: nextStatus });
                                 setManagedUsers(updated);
+                                setUserSuccessMsg(
+                                  nextStatus === 'active'
+                                    ? `Đã phê duyệt kích hoạt tài khoản "${u.email}" thành công!`
+                                    : `Đã tạm khóa tài khoản "${u.email}".`
+                                );
+                                setTimeout(() => setUserSuccessMsg(''), 3000);
                               }}
                               className={`px-2.5 py-1 rounded-lg text-[11px] font-bold transition flex items-center gap-1 ${
                                 u.status === 'active'
                                   ? 'bg-emerald-50 dark:bg-emerald-950 text-emerald-600 dark:text-emerald-400 border border-emerald-200 dark:border-emerald-800 hover:bg-rose-50 hover:text-rose-600'
+                                  : u.status === 'pending'
+                                  ? 'bg-amber-50 dark:bg-amber-950 text-amber-600 dark:text-amber-400 border border-amber-300 dark:border-amber-800 hover:bg-emerald-600 hover:text-white'
                                   : 'bg-rose-50 dark:bg-rose-950 text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 hover:bg-emerald-50 hover:text-emerald-600'
                               }`}
-                              title="Nhấp để thay đổi Trạng Thái"
+                              title={
+                                u.status === 'pending'
+                                  ? 'Nhấp để Phê duyệt (Approve) tài khoản này'
+                                  : 'Nhấp để thay đổi Trạng Thái'
+                              }
                             >
                               {u.status === 'active' ? (
                                 <>
                                   <UserCheck className="w-3.5 h-3.5" />
                                   <span>Active</span>
+                                </>
+                              ) : u.status === 'pending' ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Chờ duyệt (Nhấp để Duyệt)</span>
                                 </>
                               ) : (
                                 <>
