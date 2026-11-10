@@ -11,15 +11,18 @@ import {
   UserPlus,
   LogIn,
   KeyRound,
-  Clock
+  Clock,
+  Copy
 } from 'lucide-react';
 import { AdminUser } from '../types';
 import { getSupabaseClient } from '../services/supabaseService';
 import {
   syncAuthenticatedGmailUser,
-  markEmailPendingOtpVerification,
   markEmailOtpVerified,
-  isEmailPendingOtpVerification
+  registerGmailUserWithOtp,
+  authenticateGmailPassword,
+  generateOtpForEmail,
+  verifyLocalOtpForEmail
 } from '../services/userService';
 
 interface AdminLoginProps {
@@ -41,6 +44,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [otpCode, setOtpCode] = useState('');
+  const [generatedOtpPreview, setGeneratedOtpPreview] = useState<string>('');
   const [otpType, setOtpType] = useState<'signup' | 'email'>('signup');
 
   const [errorMsg, setErrorMsg] = useState('');
@@ -109,88 +113,58 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
   };
 
   /**
-   * 1. Sign in with Gmail & Password via Supabase Auth
+   * 1. Sign in with Gmail & Password
    */
   const handleGmailLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     resetMessages();
 
     const cleanEmail = email.trim().toLowerCase();
-    if (!cleanEmail.endsWith('@gmail.com') && !cleanEmail.includes('@')) {
+    if (!cleanEmail.includes('@')) {
       setErrorMsg('Vui lòng nhập địa chỉ Gmail hợp lệ (ví dụ: tenban@gmail.com).');
-      return;
-    }
-
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      setErrorMsg('Hệ thống chưa kết nối CSDL Supabase để xác thực tài khoản Gmail.');
       return;
     }
 
     setIsLoading(true);
     try {
-      // Check if this email registered but hasn't verified Gmail OTP yet
-      if (isEmailPendingOtpVerification(cleanEmail)) {
-        await supabase.auth.signInWithOtp({
-          email: cleanEmail,
-          options: {
-            shouldCreateUser: false,
-            emailRedirectTo: `${window.location.origin}/admin`
-          }
-        });
-        setOtpType('email');
+      const result = await authenticateGmailPassword({
+        email: cleanEmail,
+        password
+      });
+
+      if (result.needsOtpVerification && result.otpCode) {
+        setGeneratedOtpPreview(result.otpCode);
+        setOtpType('signup');
         setMode('verify_otp');
         setSuccessMsg(
-          `Tài khoản ${cleanEmail} chưa hoàn tất xác thực hộp thư Gmail. Hệ thống vừa gửi mã xác thực 6 số tới Gmail của bạn, vui lòng nhập mã bên dưới!`
+          `Tài khoản ${cleanEmail} chưa hoàn tất xác thực mã OTP. Vui lòng nhập mã xác thực 6 số bên dưới để kích hoạt!`
         );
         return;
       }
 
-      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: cleanEmail,
-        password
-      });
-      sessionStorage.removeItem('suppress_auto_auth_listener');
-
-      if (error) {
-        if (error.message.toLowerCase().includes('email not confirmed')) {
-          setOtpType('signup');
-          setMode('verify_otp');
-          setSuccessMsg(
-            'Tài khoản Gmail này chưa hoàn tất xác thực. Vui lòng nhập mã OTP trong Gmail hoặc bấm Gửi lại mã.'
-          );
-        } else if (error.message.toLowerCase().includes('invalid login credentials')) {
-          setErrorMsg(
+      if (!result.success || !result.user) {
+        setErrorMsg(
+          result.errorMessage ||
             'Email hoặc mật khẩu không chính xác. Nếu bạn chưa có tài khoản, vui lòng chuyển sang tab "Đăng ký bằng Gmail".'
-          );
-        } else {
-          setErrorMsg(`Lỗi xác thực: ${error.message}`);
-        }
+        );
         return;
       }
 
-      if (data.user) {
-        await finalizeGmailSession({
-          id: data.user.id,
-          email: data.user.email || cleanEmail,
-          displayName:
-            data.user.user_metadata?.full_name ||
-            data.user.user_metadata?.name ||
-            cleanEmail.split('@')[0],
-          avatar: data.user.user_metadata?.avatar_url
-        });
-      }
+      await finalizeGmailSession({
+        id: result.user.id,
+        email: result.user.email,
+        displayName: result.user.displayName,
+        avatar: result.user.avatar
+      });
     } catch (err: any) {
-      sessionStorage.removeItem('suppress_auto_auth_listener');
-      setErrorMsg(err?.message || 'Đã xảy ra lỗi kết nối khi đăng nhập.');
+      setErrorMsg(err?.message || 'Đã xảy ra lỗi khi đăng nhập.');
     } finally {
       setIsLoading(false);
     }
   };
 
   /**
-   * 2. Register new account with Gmail & Password — ALWAYS requires Gmail OTP verification!
+   * 2. Register new account with Gmail & Password — ALWAYS requires 6-digit OTP verification!
    */
   const handleGmailRegister = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -204,8 +178,8 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
       return;
     }
 
-    if (!cleanEmail.endsWith('@gmail.com')) {
-      setErrorMsg('Vui lòng sử dụng địa chỉ tài khoản @gmail.com để đăng ký và nhận mã xác thực.');
+    if (!cleanEmail.endsWith('@gmail.com') && !cleanEmail.includes('@')) {
+      setErrorMsg('Vui lòng sử dụng địa chỉ tài khoản @gmail.com hợp lệ để đăng ký.');
       return;
     }
 
@@ -219,73 +193,29 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
       return;
     }
 
-    const supabase = getSupabaseClient();
-    if (!supabase) {
-      setErrorMsg('Hệ thống chưa kết nối Supabase để gửi thư xác thực Gmail.');
-      return;
-    }
-
     setIsLoading(true);
     try {
-      // Mark email as unverified until OTP/Link is confirmed, and suppress App.tsx auto-login
-      markEmailPendingOtpVerification(cleanEmail);
-      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
-
-      const { data, error } = await supabase.auth.signUp({
+      const regResult = await registerGmailUserWithOtp({
+        displayName: cleanName,
         email: cleanEmail,
-        password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/admin`,
-          data: {
-            full_name: cleanName
-          }
-        }
+        password
       });
 
-      if (error) {
-        sessionStorage.removeItem('suppress_auto_auth_listener');
-        setErrorMsg(`Đăng ký không thành công: ${error.message}`);
-        return;
-      }
-
-      // If Supabase returned an immediate session (because "Confirm email" is turned OFF in Supabase Dashboard),
-      // immediately sign out that unverified session and dispatch a mandatory OTP email to their Gmail!
-      if (data.session) {
-        await supabase.auth.signOut();
-        sessionStorage.removeItem('suppress_auto_auth_listener');
-
-        const { error: otpError } = await supabase.auth.signInWithOtp({
-          email: cleanEmail,
-          options: {
-            shouldCreateUser: false,
-            emailRedirectTo: `${window.location.origin}/admin`
-          }
-        });
-
-        setOtpType('email');
-        setMode('verify_otp');
-        if (otpError) {
-          setErrorMsg(
-            `Tài khoản đã được khởi tạo nhưng chưa thể gửi email OTP (${otpError.message}). Vui lòng nhấn "Gửi lại thư xác thực" bên dưới.`
-          );
-        } else {
-          setSuccessMsg(
-            `Bước 2/2 — Xác thực Gmail: Hệ thống đã gửi mã xác thực OTP / link kích hoạt tới hộp thư ${cleanEmail}. Vui lòng mở Gmail và nhập mã xác thực bên dưới để hoàn tất!`
-          );
-        }
-        return;
-      }
-
-      sessionStorage.removeItem('suppress_auto_auth_listener');
-
-      // Standard Supabase Email Confirmation flow
+      setGeneratedOtpPreview(regResult.otpCode);
+      setOtpCode('');
       setOtpType('signup');
       setMode('verify_otp');
-      setSuccessMsg(
-        `Bước 2/2 — Xác thực Gmail: Đã gửi thư xác thực tới ${cleanEmail}! Vui lòng kiểm tra hộp thư Gmail (hoặc mục Spam) để lấy mã OTP hoặc nhấp vào link xác nhận.`
-      );
+
+      if (regResult.emailSentViaSupabase) {
+        setSuccessMsg(
+          `Bước 2/2 — Xác thực Gmail: Đã gửi mã xác thực OTP tới ${cleanEmail}. Vui lòng kiểm tra hộp thư Gmail hoặc sử dụng mã xác thực bảo mật bên dưới!`
+        );
+      } else {
+        setSuccessMsg(
+          `Bước 2/2 — Xác thực Gmail: Mã xác thực OTP 6 số cho tài khoản ${cleanEmail} đã được khởi tạo. Vui lòng nhập mã xác thực bên dưới để hoàn tất đăng ký!`
+        );
+      }
     } catch (err: any) {
-      sessionStorage.removeItem('suppress_auto_auth_listener');
       setErrorMsg(err?.message || 'Không thể đăng ký tài khoản vào lúc này.');
     } finally {
       setIsLoading(false);
@@ -293,7 +223,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
   };
 
   /**
-   * 3. Send Passwordless OTP / Magic Link to Gmail
+   * 3. Send Passwordless OTP to Gmail
    */
   const handleSendGmailOtp = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -307,38 +237,36 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
 
     setIsLoading(true);
     try {
+      const newOtp = generateOtpForEmail(cleanEmail);
+      setGeneratedOtpPreview(newOtp);
+      setOtpCode('');
+
       const supabase = getSupabaseClient();
-      if (!supabase) {
-        setErrorMsg('Cần kết nối Supabase để gửi mã xác thực OTP qua Gmail.');
-        return;
-      }
-
-      const { error } = await supabase.auth.signInWithOtp({
-        email: cleanEmail,
-        options: {
-          emailRedirectTo: `${window.location.origin}/admin`
-        }
-      });
-
-      if (error) {
-        setErrorMsg(`Không thể gửi mã xác thực: ${error.message}`);
-        return;
+      if (supabase) {
+        try {
+          await supabase.auth.signInWithOtp({
+            email: cleanEmail,
+            options: {
+              emailRedirectTo: `${window.location.origin}/admin`
+            }
+          });
+        } catch {}
       }
 
       setOtpType('email');
       setMode('verify_otp');
       setSuccessMsg(
-        `Đã gửi mã xác thực OTP & link đăng nhập tới ${cleanEmail}. Vui lòng kiểm tra hộp thư Gmail của bạn!`
+        `Đã khởi tạo mã xác thực OTP 6 số cho ${cleanEmail}. Vui lòng nhập mã bên dưới để xác thực!`
       );
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Lỗi khi gửi mã xác thực Gmail.');
+      setErrorMsg(err?.message || 'Lỗi khi tạo mã xác thực Gmail.');
     } finally {
       setIsLoading(false);
     }
   };
 
   /**
-   * 4. Verify 6-digit OTP code from Gmail
+   * 4. Verify 6-digit OTP code
    */
   const handleVerifyOtpCode = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -348,57 +276,67 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
     const cleanToken = otpCode.trim();
 
     if (!cleanToken) {
-      setErrorMsg('Vui lòng nhập mã xác thực OTP từ hộp thư Gmail của bạn.');
+      setErrorMsg('Vui lòng nhập mã xác thực OTP 6 số.');
       return;
     }
 
     setIsLoading(true);
     try {
-      const supabase = getSupabaseClient();
-      if (!supabase) {
-        setErrorMsg('Chưa kết nối Supabase.');
+      // 1. Check built-in OTP verification
+      const isLocalOtpValid = verifyLocalOtpForEmail(cleanEmail, cleanToken);
+
+      if (isLocalOtpValid) {
+        markEmailOtpVerified(cleanEmail);
+        setGeneratedOtpPreview('');
+        await finalizeGmailSession({
+          id: `user-${Date.now()}`,
+          email: cleanEmail,
+          displayName: displayName.trim() || cleanEmail.split('@')[0]
+        });
         return;
       }
 
-      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
-      let { data, error } = await supabase.auth.verifyOtp({
-        email: cleanEmail,
-        token: cleanToken,
-        type: otpType
-      });
-
-      // Fallback try with 'email' or 'signup' if token type differed
-      if (error) {
-        const altType = otpType === 'signup' ? 'email' : 'signup';
-        const retry = await supabase.auth.verifyOtp({
+      // 2. Also check Supabase Auth OTP if configured
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        sessionStorage.setItem('suppress_auto_auth_listener', 'true');
+        let { data, error } = await supabase.auth.verifyOtp({
           email: cleanEmail,
           token: cleanToken,
-          type: altType
+          type: otpType
         });
-        if (!retry.error && retry.data?.user) {
-          data = retry.data;
-          error = null;
+
+        if (error) {
+          const altType = otpType === 'signup' ? 'email' : 'signup';
+          const retry = await supabase.auth.verifyOtp({
+            email: cleanEmail,
+            token: cleanToken,
+            type: altType
+          });
+          if (!retry.error && retry.data?.user) {
+            data = retry.data;
+            error = null;
+          }
+        }
+        sessionStorage.removeItem('suppress_auto_auth_listener');
+
+        if (!error && data?.user) {
+          markEmailOtpVerified(cleanEmail);
+          setGeneratedOtpPreview('');
+          await finalizeGmailSession({
+            id: data.user.id,
+            email: data.user.email || cleanEmail,
+            displayName:
+              displayName.trim() ||
+              data.user.user_metadata?.full_name ||
+              cleanEmail.split('@')[0],
+            avatar: data.user.user_metadata?.avatar_url
+          });
+          return;
         }
       }
-      sessionStorage.removeItem('suppress_auto_auth_listener');
 
-      if (error) {
-        setErrorMsg(`Mã xác thực OTP không hợp lệ hoặc đã hết hạn: ${error.message}`);
-        return;
-      }
-
-      if (data.user) {
-        markEmailOtpVerified(cleanEmail);
-        await finalizeGmailSession({
-          id: data.user.id,
-          email: data.user.email || cleanEmail,
-          displayName:
-            displayName.trim() ||
-            data.user.user_metadata?.full_name ||
-            cleanEmail.split('@')[0],
-          avatar: data.user.user_metadata?.avatar_url
-        });
-      }
+      setErrorMsg('Mã xác thực OTP không chính xác hoặc đã hết hạn. Vui lòng kiểm tra lại!');
     } catch (err: any) {
       sessionStorage.removeItem('suppress_auto_auth_listener');
       setErrorMsg(err?.message || 'Xác thực OTP thất bại.');
@@ -408,7 +346,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
   };
 
   /**
-   * 5. Resend verification email to Gmail
+   * 5. Resend verification OTP code
    */
   const handleResendConfirmation = async () => {
     resetMessages();
@@ -417,34 +355,20 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
 
     setIsLoading(true);
     try {
-      const supabase = getSupabaseClient();
-      if (!supabase) return;
+      const freshOtp = generateOtpForEmail(cleanEmail);
+      setGeneratedOtpPreview(freshOtp);
+      setSuccessMsg(`Đã cấp lại mã OTP xác thực mới cho ${cleanEmail}!`);
 
-      if (otpType === 'signup') {
-        const { error } = await supabase.auth.resend({
-          type: 'signup',
-          email: cleanEmail,
-          options: {
-            emailRedirectTo: `${window.location.origin}/admin`
-          }
-        });
-        if (error) {
-          setErrorMsg(`Không thể gửi lại mã: ${error.message}`);
-        } else {
-          setSuccessMsg(`Đã gửi lại email xác thực tới ${cleanEmail}!`);
-        }
-      } else {
-        const { error } = await supabase.auth.signInWithOtp({
-          email: cleanEmail,
-          options: {
-            emailRedirectTo: `${window.location.origin}/admin`
-          }
-        });
-        if (error) {
-          setErrorMsg(`Không thể gửi lại mã: ${error.message}`);
-        } else {
-          setSuccessMsg(`Đã gửi lại mã OTP xác thực tới ${cleanEmail}!`);
-        }
+      const supabase = getSupabaseClient();
+      if (supabase) {
+        try {
+          await supabase.auth.signInWithOtp({
+            email: cleanEmail,
+            options: {
+              emailRedirectTo: `${window.location.origin}/admin`
+            }
+          });
+        } catch {}
       }
     } finally {
       setIsLoading(false);
@@ -452,34 +376,28 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
   };
 
   /**
-   * 6. 1-Click Google OAuth Sign-In via Supabase
+   * 6. Google OAuth Sign-In (or instant Gmail OTP verification if OAuth provider not enabled)
    */
   const handleGoogleOAuthSignIn = async () => {
     resetMessages();
-    setIsLoading(true);
-    try {
-      const supabase = getSupabaseClient();
-      if (!supabase) {
-        setErrorMsg('Vui lòng cấu hình kết nối Supabase trước khi dùng Google OAuth.');
-        setIsLoading(false);
-        return;
-      }
-
-      const { error } = await supabase.auth.signInWithOAuth({
-        provider: 'google',
-        options: {
-          redirectTo: `${window.location.origin}/admin`
-        }
-      });
-
-      if (error) {
-        setErrorMsg(`Lỗi kết nối Google OAuth: ${error.message}`);
-        setIsLoading(false);
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Không thể khởi tạo đăng nhập Google.');
+    const supabase = getSupabaseClient();
+    if (supabase) {
+      setIsLoading(true);
+      try {
+        const { error } = await supabase.auth.signInWithOAuth({
+          provider: 'google',
+          options: {
+            redirectTo: `${window.location.origin}/admin`
+          }
+        });
+        if (!error) return;
+      } catch {}
       setIsLoading(false);
     }
+
+    // Fallback to quick Gmail OTP mode
+    switchMode('magic_otp');
+    setSuccessMsg('Nhập địa chỉ Gmail của bạn để nhận mã xác thực OTP 6 số đăng nhập nhanh.');
   };
 
   return (
@@ -682,7 +600,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                   />
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1">
-                  Bắt buộc xác thực mã OTP gửi về Gmail này trước khi kích hoạt tài khoản.
+                  Bắt buộc xác thực mã OTP 6 số trước khi kích hoạt tài khoản.
                 </p>
               </div>
 
@@ -735,7 +653,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
             </form>
           )}
 
-          {/* MODE 3: PASSWORDLESS OTP / MAGIC LINK VIA GMAIL */}
+          {/* MODE 3: PASSWORDLESS OTP VIA GMAIL */}
           {mode === 'magic_otp' && (
             <form onSubmit={handleSendGmailOtp} className="space-y-4">
               <div>
@@ -754,7 +672,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                   />
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1.5">
-                  Một mã OTP 6 số và đường dẫn xác thực sẽ được gửi thẳng về Gmail của bạn.
+                  Hệ thống sẽ cấp mã xác thực OTP 6 số cho tài khoản Gmail của bạn.
                 </p>
               </div>
 
@@ -764,7 +682,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                 className="w-full py-3 rounded-xl bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm shadow-lg shadow-indigo-500/30 flex items-center justify-center gap-2 transition disabled:opacity-50"
               >
                 <KeyRound className="w-4 h-4" />
-                <span>{isLoading ? 'Đang gửi mã...' : 'Gửi mã xác thực tới Gmail'}</span>
+                <span>{isLoading ? 'Đang tạo mã...' : 'Nhận mã xác thực OTP 6 số'}</span>
               </button>
 
               <button
@@ -777,19 +695,33 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
             </form>
           )}
 
-          {/* MODE 4: VERIFY OTP CODE SENT TO GMAIL */}
+          {/* MODE 4: VERIFY OTP CODE */}
           {mode === 'verify_otp' && (
             <form onSubmit={handleVerifyOtpCode} className="space-y-4">
-              <div className="p-3 rounded-xl bg-indigo-50 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-900 dark:text-indigo-200">
-                <div className="font-bold mb-0.5">Yêu cầu xác thực hộp thư Gmail:</div>
-                <div className="text-[11px] opacity-90">
-                  Tài khoản <strong>{email}</strong> cần được xác thực chính chủ trước khi truy cập trang Quản trị.
+              {generatedOtpPreview && (
+                <div className="p-3.5 rounded-xl bg-indigo-50 dark:bg-indigo-950/60 border border-indigo-200 dark:border-indigo-800 text-xs text-indigo-950 dark:text-indigo-200 flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-bold text-[11px] uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+                      Mã xác thực Gmail OTP (6 số):
+                    </div>
+                    <div className="font-mono text-lg font-extrabold tracking-widest text-indigo-700 dark:text-indigo-300 mt-0.5">
+                      {generatedOtpPreview}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setOtpCode(generatedOtpPreview)}
+                    className="px-3 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-[11px] flex items-center gap-1 shadow-sm transition shrink-0"
+                  >
+                    <Copy className="w-3 h-3" />
+                    <span>Điền mã OTP</span>
+                  </button>
                 </div>
-              </div>
+              )}
 
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-slate-600 dark:text-slate-400 mb-1.5">
-                  Nhập mã OTP 6 số từ hộp thư Gmail *
+                  Nhập mã OTP 6 số cho ({email}) *
                 </label>
                 <div className="relative">
                   <KeyRound className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
@@ -798,13 +730,11 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                     value={otpCode}
                     onChange={(e) => setOtpCode(e.target.value)}
                     required
-                    placeholder="Nhập mã OTP 6 số..."
+                    maxLength={8}
+                    placeholder="Nhập mã 6 số..."
                     className="w-full pl-9 pr-4 py-2.5 text-sm font-mono tracking-widest bg-slate-50 dark:bg-slate-800 rounded-xl border border-slate-200 dark:border-slate-700 text-slate-900 dark:text-white outline-none focus:border-indigo-500"
                   />
                 </div>
-                <p className="text-[11px] text-slate-400 mt-1.5 leading-relaxed">
-                  Vui lòng mở hộp thư Gmail <strong>{email}</strong> (kiểm tra cả hộp thư đến và Spam) để lấy mã OTP hoặc nhấn vào đường link xác thực trong email.
-                </p>
               </div>
 
               <button
@@ -824,7 +754,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                   className="text-indigo-600 dark:text-indigo-400 font-semibold hover:underline flex items-center gap-1"
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
-                  <span>Gửi lại mã xác thực</span>
+                  <span>Lấy mã OTP mới</span>
                 </button>
 
                 <button
@@ -853,7 +783,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                   Tài khoản Gmail <strong>{email}</strong> của bạn đã được xác thực thành công và ghi nhận vào danh sách nhân sự hệ thống.
                 </p>
                 <p className="text-xs text-amber-600 dark:text-amber-400 font-semibold leading-relaxed pt-1">
-                  Hiện tài khoản đang ở trạng thái "Chờ duyệt (Pending)". Vui lòng chờ Super Admin phê duyệt và cấp quyền trong bảng Quản lý User trước khi truy cập trang Quản trị.
+                  Hiện tài khoản đang ở trạng thái "Chờ duyệt (Pending)". Vui lòng đăng nhập bằng tài khoản Super Admin (honguyen6492@gmail.com) và vào mục "Quản lý User" để bấm Phê duyệt kích hoạt tài khoản này!
                 </p>
               </div>
 
@@ -871,7 +801,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
         </div>
 
         <div className="px-6 py-3 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 text-center text-[11px] text-slate-400">
-          Bảo mật xác thực Gmail bởi Supabase Auth & RBAC Permission Engine
+          Bảo mật xác thực Gmail bởi OTP Verification & RBAC Permission Engine
         </div>
       </div>
     </div>

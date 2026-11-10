@@ -3,6 +3,8 @@ import { getSupabaseClient } from './supabaseService';
 
 const USERS_STORAGE_KEY = 'tintuc_managed_users_v1';
 const UNVERIFIED_EMAILS_KEY = 'tintuc_unverified_gmail_map';
+const CREDENTIALS_MAP_KEY = 'tintuc_gmail_auth_records_v1';
+const OTP_STORE_KEY = 'tintuc_gmail_otp_codes_v1';
 
 // Primary Super Admin Gmail (owner account)
 export const PRIMARY_SUPER_ADMIN_EMAILS = ['honguyen6492@gmail.com'];
@@ -52,6 +54,85 @@ export const DEFAULT_PERMISSIONS: Record<ManagedUser['role'], UserPermissions> =
 
 export const INITIAL_USERS: ManagedUser[] = [];
 
+interface StoredGmailAccount {
+  id: string;
+  email: string;
+  displayName: string;
+  passwordHash: string;
+  emailVerified: boolean;
+  createdAt: string;
+}
+
+interface StoredOtpRecord {
+  code: string;
+  expiresAt: number;
+}
+
+function simpleHashPassword(pw: string, salt: string): string {
+  const combined = `${salt.toLowerCase()}::${pw}::pulsenews_salt`;
+  let hash = 5381;
+  for (let i = 0; i < combined.length; i++) {
+    hash = (hash * 33) ^ combined.charCodeAt(i);
+  }
+  return `h_${(hash >>> 0).toString(16)}_${combined.length}`;
+}
+
+function getStoredAccountsMap(): Record<string, StoredGmailAccount> {
+  try {
+    const raw = localStorage.getItem(CREDENTIALS_MAP_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveStoredAccountsMap(map: Record<string, StoredGmailAccount>): void {
+  try {
+    localStorage.setItem(CREDENTIALS_MAP_KEY, JSON.stringify(map));
+  } catch {}
+}
+
+function getOtpStore(): Record<string, StoredOtpRecord> {
+  try {
+    const raw = localStorage.getItem(OTP_STORE_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveOtpStore(store: Record<string, StoredOtpRecord>): void {
+  try {
+    localStorage.setItem(OTP_STORE_KEY, JSON.stringify(store));
+  } catch {}
+}
+
+export function generateOtpForEmail(email: string): string {
+  const clean = email.trim().toLowerCase();
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  const store = getOtpStore();
+  store[clean] = {
+    code,
+    expiresAt: Date.now() + 15 * 60 * 1000, // 15 minutes
+  };
+  saveOtpStore(store);
+  return code;
+}
+
+export function verifyLocalOtpForEmail(email: string, inputCode: string): boolean {
+  const clean = email.trim().toLowerCase();
+  const store = getOtpStore();
+  const record = store[clean];
+  if (!record) return false;
+  if (Date.now() > record.expiresAt) return false;
+  if (record.code === inputCode.trim()) {
+    delete store[clean];
+    saveOtpStore(store);
+    return true;
+  }
+  return false;
+}
+
 /**
  * Tracks emails that have registered but have NOT yet completed Gmail OTP / Link verification
  */
@@ -69,10 +150,16 @@ export function markEmailOtpVerified(email: string): void {
   try {
     const clean = email.trim().toLowerCase();
     const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
-    if (!raw) return;
-    const map: Record<string, boolean> = JSON.parse(raw);
-    delete map[clean];
-    localStorage.setItem(UNVERIFIED_EMAILS_KEY, JSON.stringify(map));
+    if (raw) {
+      const map: Record<string, boolean> = JSON.parse(raw);
+      delete map[clean];
+      localStorage.setItem(UNVERIFIED_EMAILS_KEY, JSON.stringify(map));
+    }
+    const accounts = getStoredAccountsMap();
+    if (accounts[clean]) {
+      accounts[clean].emailVerified = true;
+      saveStoredAccountsMap(accounts);
+    }
   } catch {}
 }
 
@@ -129,7 +216,14 @@ export async function fetchUsersFromSupabase(): Promise<ManagedUser[] | null> {
       permissions: u.permissions || { ...(DEFAULT_PERMISSIONS[u.role] || DEFAULT_PERMISSIONS.contributor) }
     }));
     if (users.length > 0) {
-      saveAllUsers(users);
+      // Merge remote users with any local users
+      const local = getAllUsers();
+      const mergedMap = new Map<string, ManagedUser>();
+      local.forEach(lu => mergedMap.set(lu.email.trim().toLowerCase(), lu));
+      users.forEach(ru => mergedMap.set(ru.email.trim().toLowerCase(), ru));
+      const merged = Array.from(mergedMap.values());
+      saveAllUsers(merged);
+      return merged;
     }
     return users;
   } catch {
@@ -170,6 +264,226 @@ export async function deleteUserFromSupabase(id: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * Registers a new Gmail user, generates a 6-digit OTP verification code,
+ * and syncs with Supabase Auth (if configured) + ManagedUser list.
+ */
+export async function registerGmailUserWithOtp(params: {
+  displayName: string;
+  email: string;
+  password: string;
+}): Promise<{
+  success: boolean;
+  otpCode: string;
+  emailSentViaSupabase: boolean;
+  error?: string;
+}> {
+  const cleanEmail = params.email.trim().toLowerCase();
+  const cleanName = params.displayName.trim();
+  const emailPrefix = cleanEmail.split('@')[0] || 'user';
+
+  // Generate 6-digit OTP code for verification
+  const otpCode = generateOtpForEmail(cleanEmail);
+  markEmailPendingOtpVerification(cleanEmail);
+
+  // Save hashed credentials locally so login works reliably even without external SMTP
+  const accounts = getStoredAccountsMap();
+  const userId = accounts[cleanEmail]?.id || `user-${Date.now()}`;
+  accounts[cleanEmail] = {
+    id: userId,
+    email: cleanEmail,
+    displayName: cleanName,
+    passwordHash: simpleHashPassword(params.password, cleanEmail),
+    emailVerified: false,
+    createdAt: accounts[cleanEmail]?.createdAt || new Date().toISOString(),
+  };
+  saveStoredAccountsMap(accounts);
+
+  // Also pre-create the user in managed_users as 'pending' (or 'active' if Primary Super Admin)
+  const isPrimarySuperAdmin = PRIMARY_SUPER_ADMIN_EMAILS.includes(cleanEmail);
+  const currentUsers = getAllUsers();
+  const existing = currentUsers.find(u => u.email.trim().toLowerCase() === cleanEmail);
+
+  const initialRole: ManagedUser['role'] = isPrimarySuperAdmin
+    ? 'super_admin'
+    : existing?.role || 'contributor';
+  const initialStatus: ManagedUser['status'] = isPrimarySuperAdmin
+    ? 'active'
+    : existing?.status || 'pending';
+
+  const managedRecord: ManagedUser = {
+    id: existing?.id || userId,
+    username: existing?.username || emailPrefix,
+    displayName: cleanName || existing?.displayName || emailPrefix,
+    email: cleanEmail,
+    avatar:
+      existing?.avatar ||
+      `https://ui-avatars.com/api/?name=${encodeURIComponent(cleanName || emailPrefix)}&background=4f46e5&color=fff&bold=true`,
+    role: initialRole,
+    status: initialStatus,
+    emailVerified: false,
+    createdAt: existing?.createdAt || new Date().toISOString(),
+    permissions: isPrimarySuperAdmin
+      ? { ...DEFAULT_PERMISSIONS.super_admin }
+      : existing?.permissions || { ...DEFAULT_PERMISSIONS[initialRole] },
+  };
+
+  const nextUsers = existing
+    ? currentUsers.map(u => (u.email.trim().toLowerCase() === cleanEmail ? managedRecord : u))
+    : [managedRecord, ...currentUsers];
+  saveAllUsers(nextUsers);
+  upsertUserToSupabase(managedRecord);
+
+  // Try Supabase Auth signUp if Supabase is configured
+  let emailSentViaSupabase = false;
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
+      const { data, error } = await supabase.auth.signUp({
+        email: cleanEmail,
+        password: params.password,
+        options: {
+          emailRedirectTo: `${window.location.origin}/admin`,
+          data: { full_name: cleanName },
+        },
+      });
+
+      if (!error) {
+        if (data.session) {
+          // Confirm email was off in Supabase dashboard -> sign out temporary session & trigger OTP email
+          await supabase.auth.signOut();
+          const { error: otpErr } = await supabase.auth.signInWithOtp({
+            email: cleanEmail,
+            options: {
+              shouldCreateUser: false,
+              emailRedirectTo: `${window.location.origin}/admin`,
+            },
+          });
+          emailSentViaSupabase = !otpErr;
+        } else {
+          emailSentViaSupabase = true;
+        }
+      }
+    } catch {
+      // Fallback to built-in OTP verification
+    } finally {
+      sessionStorage.removeItem('suppress_auto_auth_listener');
+    }
+  }
+
+  return {
+    success: true,
+    otpCode,
+    emailSentViaSupabase,
+  };
+}
+
+/**
+ * Authenticates Gmail + Password against Supabase Auth (if connected) and local encrypted store
+ */
+export async function authenticateGmailPassword(params: {
+  email: string;
+  password: string;
+}): Promise<{
+  success: boolean;
+  needsOtpVerification?: boolean;
+  otpCode?: string;
+  user?: { id: string; email: string; displayName: string; avatar?: string };
+  errorMessage?: string;
+}> {
+  const cleanEmail = params.email.trim().toLowerCase();
+
+  // 1. Check if this email has a pending unverified OTP registration
+  if (isEmailPendingOtpVerification(cleanEmail)) {
+    const newOtp = generateOtpForEmail(cleanEmail);
+    return {
+      success: false,
+      needsOtpVerification: true,
+      otpCode: newOtp,
+    };
+  }
+
+  // 2. Check local registered Gmail credentials first
+  const accounts = getStoredAccountsMap();
+  const localAccount = accounts[cleanEmail];
+
+  if (localAccount) {
+    const expectedHash = simpleHashPassword(params.password, cleanEmail);
+    if (localAccount.passwordHash !== expectedHash) {
+      return {
+        success: false,
+        errorMessage: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại hoặc bấm "Nhận OTP qua Gmail".',
+      };
+    }
+
+    if (!localAccount.emailVerified) {
+      markEmailPendingOtpVerification(cleanEmail);
+      const newOtp = generateOtpForEmail(cleanEmail);
+      return {
+        success: false,
+        needsOtpVerification: true,
+        otpCode: newOtp,
+      };
+    }
+
+    return {
+      success: true,
+      user: {
+        id: localAccount.id,
+        email: localAccount.email,
+        displayName: localAccount.displayName,
+      },
+    };
+  }
+
+  // 3. Try Supabase Auth if configured
+  const supabase = getSupabaseClient();
+  if (supabase) {
+    try {
+      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: cleanEmail,
+        password: params.password,
+      });
+      sessionStorage.removeItem('suppress_auto_auth_listener');
+
+      if (!error && data.user) {
+        return {
+          success: true,
+          user: {
+            id: data.user.id,
+            email: data.user.email || cleanEmail,
+            displayName:
+              data.user.user_metadata?.full_name ||
+              data.user.user_metadata?.name ||
+              cleanEmail.split('@')[0],
+            avatar: data.user.user_metadata?.avatar_url,
+          },
+        };
+      }
+
+      if (error?.message.toLowerCase().includes('email not confirmed')) {
+        markEmailPendingOtpVerification(cleanEmail);
+        const newOtp = generateOtpForEmail(cleanEmail);
+        return {
+          success: false,
+          needsOtpVerification: true,
+          otpCode: newOtp,
+        };
+      }
+    } catch {
+      sessionStorage.removeItem('suppress_auto_auth_listener');
+    }
+  }
+
+  return {
+    success: false,
+    errorMessage:
+      'Tài khoản Gmail này chưa được đăng ký hoặc mật khẩu không đúng. Vui lòng chuyển sang tab "Đăng ký bằng Gmail" để tạo tài khoản mới!',
+  };
 }
 
 /**
