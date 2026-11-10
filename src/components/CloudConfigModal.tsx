@@ -18,8 +18,8 @@ export const CloudConfigModal: React.FC<CloudConfigModalProps> = ({ isOpen, onCl
 
   const envTemplate = `# Environment Variables for Vercel Deployment (Settings -> Environment Variables)
 
-# 1. Gemini AI API Key (Summaries, Hashtags, Proofreading)
-VITE_GEMINI_API_KEY="AIzaSyYourGeminiApiKeyHere"
+# 1. Gemini AI API Key (Server-side API Proxy - Secure & Hidden)
+GEMINI_API_KEY="AIzaSyYourGeminiApiKeyHere"
 
 # 2. Cloud DB Connection (Supabase)
 VITE_SUPABASE_URL="https://your-project.supabase.co"

@@ -3,6 +3,7 @@ import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { GoogleGenAI } from '@google/genai';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -229,7 +230,87 @@ Sitemap: ${req.protocol}://${req.get('host')}/sitemap.xml
   res.send(robotsContent);
 });
 
+// Helper for Server-side Gemini API client (secret key kept on server, never bundled to client JS)
+function getAIClient() {
+  const key = process.env.GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY || '';
+  if (!key) return null;
+  return new GoogleGenAI({ apiKey: key });
+}
+
 // API Routes
+app.post('/api/ai/summary', async (req: Request, res: Response) => {
+  const { title = '', content = '' } = req.body;
+  const ai = getAIClient();
+  if (!ai) {
+    return res.json({ summary: content.slice(0, 150) + '...' });
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `You are a senior news editor. Write a concise 1-2 sentence summary (around 25-30 words) in clear English for the following article:\nTitle: ${title}\nContent: ${content.slice(0, 1000)}`
+    });
+    return res.json({ summary: response.text?.trim() || content.slice(0, 150) + '...' });
+  } catch (err) {
+    console.warn('Server Gemini summary error:', err);
+    return res.json({ summary: content.slice(0, 150) + '...' });
+  }
+});
+
+app.post('/api/ai/tags', async (req: Request, res: Response) => {
+  const { title = '', content = '' } = req.body;
+  const ai = getAIClient();
+  if (!ai) {
+    return res.json({ tags: ['News', 'Latest'] });
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `Generate 4 concise English hashtags (e.g. AI, Tech, Security) suitable for this article. Return ONLY a comma-separated list:\nTitle: ${title}\nContent: ${content.slice(0, 500)}`
+    });
+    const raw = response.text || '';
+    const tags = raw
+      .split(',')
+      .map(t => t.replace(/#/g, '').trim())
+      .filter(t => t.length > 0)
+      .slice(0, 5);
+    return res.json({ tags: tags.length ? tags : ['News', 'Latest'] });
+  } catch (err) {
+    console.warn('Server Gemini tags error:', err);
+    return res.json({ tags: ['News', 'Latest'] });
+  }
+});
+
+app.post('/api/ai/proofread', async (req: Request, res: Response) => {
+  const { title = '', content = '' } = req.body;
+  const ai = getAIClient();
+  if (!ai) {
+    return res.json({ title, content });
+  }
+
+  try {
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: `Proofread for spelling, polish journalistic tone in English, and add Markdown subheadings to the following article.\nReturn a JSON object with keys "title" and "content".\nTitle: ${title}\nContent: ${content}`
+    });
+
+    const text = response.text || '';
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      const parsed = JSON.parse(jsonMatch[0]);
+      return res.json({
+        title: parsed.title || title,
+        content: parsed.content || content
+      });
+    }
+  } catch (err) {
+    console.warn('Server Gemini proofread error:', err);
+  }
+
+  return res.json({ title, content });
+});
+
 app.post('/api/auth/login', (req: Request, res: Response) => {
   const { username, password } = req.body;
   const adminUsername = process.env.ADMIN_USERNAME || 'admin';
