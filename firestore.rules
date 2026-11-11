@@ -103,6 +103,77 @@ service cloud.firestore {
         data.createdAt is timestamp;
     }
 
+    // Entity Validation Blueprint: Article
+    function isValidArticle(data) {
+      return data.keys().hasAll([
+        'id',
+        'slug',
+        'title',
+        'summary',
+        'content',
+        'category',
+        'coverUrl',
+        'authorName',
+        'authorRole',
+        'authorAvatar',
+        'authorUid',
+        'publishedAt',
+        'readTimeMinutes',
+        'views',
+        'likes',
+        'isFeatured',
+        'status',
+        'tags',
+        'commentsCount',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'slug',
+        'title',
+        'summary',
+        'content',
+        'category',
+        'coverUrl',
+        'authorName',
+        'authorRole',
+        'authorAvatar',
+        'authorUid',
+        'publishedAt',
+        'readTimeMinutes',
+        'views',
+        'likes',
+        'isFeatured',
+        'status',
+        'tags',
+        'commentsCount',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.id) &&
+      data.slug is string && data.slug.size() >= 1 && data.slug.size() <= 200 &&
+      data.title is string && data.title.size() >= 1 && data.title.size() <= 300 &&
+      data.summary is string && data.summary.size() >= 1 && data.summary.size() <= 1000 &&
+      data.content is string && data.content.size() >= 1 && data.content.size() <= 100000 &&
+      data.category is string && data.category.size() >= 1 && data.category.size() <= 80 &&
+      data.coverUrl is string && data.coverUrl.size() >= 1 && data.coverUrl.size() <= 1000 &&
+      data.authorName is string && data.authorName.size() >= 1 && data.authorName.size() <= 120 &&
+      data.authorRole is string && data.authorRole.size() >= 1 && data.authorRole.size() <= 80 &&
+      data.authorAvatar is string && data.authorAvatar.size() >= 1 && data.authorAvatar.size() <= 500 &&
+      isValidId(data.authorUid) &&
+      data.publishedAt is string && data.publishedAt.size() >= 1 && data.publishedAt.size() <= 64 &&
+      data.readTimeMinutes is int && data.readTimeMinutes >= 1 && data.readTimeMinutes <= 120 &&
+      data.views is int && data.views >= 0 &&
+      data.likes is int && data.likes >= 0 &&
+      data.isFeatured is bool &&
+      data.status in ['published', 'draft'] &&
+      data.tags is list && data.tags.size() >= 1 && data.tags.size() <= 15 && data.tags[0] is string && data.tags[0].size() <= 50 &&
+      data.commentsCount is int && data.commentsCount >= 0 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
     // Collection: /managed_users/{userId}
     match /managed_users/{userId} {
       allow get: if isSignedIn() && isValidId(userId) && (
@@ -180,6 +251,59 @@ service cloud.firestore {
       allow update: if false;
 
       allow delete: if isSignedIn() && isValidId(adminId) && isSuperAdminEmail();
+    }
+
+    // Collection: /articles/{articleId}
+    match /articles/{articleId} {
+      allow get: if isValidId(articleId) && (
+        resource == null ||
+        existing().status == 'published' ||
+        (isSignedIn() && (existing().authorUid == request.auth.uid || isAdmin()))
+      );
+
+      allow list: if resource.data.status == 'published' ||
+        (isSignedIn() && (resource.data.authorUid == request.auth.uid || isSuperAdminEmail()));
+
+      allow create: if isSignedIn() &&
+        isValidId(articleId) &&
+        isValidArticle(incoming()) &&
+        incoming().id == articleId &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidId(articleId) &&
+        isValidArticle(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().authorUid == existing().authorUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Author updating their own article content
+          (
+            existing().authorUid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'slug',
+              'title',
+              'summary',
+              'content',
+              'category',
+              'coverUrl',
+              'readTimeMinutes',
+              'status',
+              'tags',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 2: Engagement counters update (views / likes)
+          (
+            incoming().diff(existing()).affectedKeys().hasOnly(['views', 'likes', 'updatedAt'])
+          ) ||
+          // Action 3: Admin full management
+          isAdmin()
+        );
+
+      allow delete: if isSignedIn() && isValidId(articleId) && isAdmin();
     }
   }
 }

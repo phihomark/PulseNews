@@ -336,7 +336,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
                   Đã xác thực Google OAuth — Chờ Admin Phê Duyệt
                 </h3>
                 <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
-                  Tài khoản Gmail <strong>{verifiedEmail}</strong> của bạn đã được xác thực thành công qua Google OAuth và lưu vào danh sách nhân sự trên Cloud Firestore.
+                  Tài khoản Gmail <strong>{verifiedEmail}</strong> của bạn đã được xác thực thành công qua Google OAuth và lưu vào danh sách nhân sự trên CSDL Supabase.
                 </p>
                 <p className="text-xs text-amber-600 dark:text-amber-400 font-semibold leading-relaxed pt-1">
                   Hiện tài khoản đang ở trạng thái "Chờ duyệt (Pending)". Vui lòng đăng nhập bằng tài khoản Super Admin (honguyen6492@gmail.com) và vào mục "Quản lý User" để bấm Phê duyệt kích hoạt tài khoản này!
@@ -357,7 +357,7 @@ export const AdminLogin: React.FC<AdminLoginProps> = ({
         </div>
 
         <div className="px-6 py-3 bg-slate-50 dark:bg-slate-950 border-t border-slate-200 dark:border-slate-800 text-center text-[11px] text-slate-400">
-          Bảo mật xác thực bởi Google OAuth (Firebase Auth) & Cloud Firestore RBAC
+          Xác thực tài khoản bởi Google OAuth • Lưu trữ CSDL trên Supabase
         </div>
       </div>
     </div>

@@ -19,6 +19,7 @@ import { auth } from './firebase';
 import { 
   getSupabaseClient,
   fetchArticlesFromSupabase, 
+  subscribeToFirestoreArticles,
   insertArticleToSupabase, 
   updateArticleInSupabase, 
   deleteArticleFromSupabase 
@@ -124,16 +125,26 @@ export default function AppContent() {
   const [isAdminLoginOpen, setIsAdminLoginOpen] = useState(false);
   const [isAdminDashboardView, setIsAdminDashboardView] = useState(false);
 
-  // Fetch from Supabase on mount if configured
+  // Fetch & subscribe in real time from Cloud Firestore (+ optional Supabase)
   useEffect(() => {
-    const loadFromSupabase = async () => {
+    const loadFromCloud = async () => {
       const data = await fetchArticlesFromSupabase();
       if (data && data.length > 0) {
         setArticles(data);
       }
     };
-    loadFromSupabase();
-  }, []);
+    loadFromCloud();
+
+    const unsubscribeArticles = subscribeToFirestoreArticles((liveArticles) => {
+      if (liveArticles && liveArticles.length > 0) {
+        setArticles(liveArticles);
+      }
+    });
+
+    return () => {
+      unsubscribeArticles();
+    };
+  }, [adminUser]);
 
   // Listen to Firebase Auth (Google OAuth Session)
   useEffect(() => {
@@ -411,17 +422,28 @@ export default function AppContent() {
   };
 
   // Publish new article handler
-  const handlePublishSuccess = (newArticle: Article) => {
-    setArticles(prev => [newArticle, ...prev]);
-    insertArticleToSupabase(newArticle);
+  const handlePublishSuccess = async (newArticle: Article) => {
+    setArticles(prev => {
+      const next = [newArticle, ...prev.filter(a => a.id !== newArticle.id)];
+      localStorage.setItem('tintuc_articles_v3', JSON.stringify(next));
+      return next;
+    });
+    await insertArticleToSupabase(newArticle);
     setActiveCategory('All');
     setShowBookmarksOnly(false);
-    setSelectedArticle(newArticle);
+    setSearchQuery('');
+    if (!isAdminDashboardView) {
+      setSelectedArticle(newArticle);
+      navigateTo(`/${newArticle.slug || newArticle.id}`);
+    }
   };
 
-  // Filtered articles memo
+  // Filtered articles memo (Public feed only displays published stories)
   const filteredArticles = useMemo(() => {
     return articles.filter(art => {
+      if (art.status === 'draft') {
+        return false;
+      }
       // Category filter
       if (activeCategory !== 'All' && art.category !== activeCategory) {
         return false;
@@ -444,7 +466,8 @@ export default function AppContent() {
 
   const featuredArticle = useMemo(() => {
     if (activeCategory !== 'All' || showBookmarksOnly || searchQuery) return null;
-    return articles.find(a => a.isFeatured) || articles[0] || null;
+    const publishedList = articles.filter(a => a.status !== 'draft');
+    return publishedList.find(a => a.isFeatured) || publishedList[0] || null;
   }, [articles, activeCategory, showBookmarksOnly, searchQuery]);
 
   const bookmarkedCount = useMemo(() => {
@@ -647,6 +670,7 @@ export default function AppContent() {
           isOpen={isPublishOpen}
           onClose={() => setIsPublishOpen(false)}
           onPublishSuccess={handlePublishSuccess}
+          currentUser={adminUser}
         />
 
         <SecurityDashboard

@@ -12,17 +12,19 @@ import {
   Plus,
   Image as ImageIcon
 } from 'lucide-react';
-import { ArticleCategory, Article } from '../types';
+import { ArticleCategory, Article, AdminUser } from '../types';
 import { generateArticleSummary, generateArticleTags, proofreadArticle } from '../services/geminiService';
 import { generatePoWPuzzle, sanitizeHTML, verifyPublishSecurity } from '../services/securityService';
 import { getAllCategories, saveCustomCategory } from '../services/categoryService';
+import { createVietnameseSlug } from '../services/supabaseService';
 import { MediaLibraryModal } from './MediaLibraryModal';
 import { WpContentEditor, WpContentEditorRef } from './WpContentEditor';
 
 interface PublishModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onPublishSuccess: (article: Article) => void;
+  onPublishSuccess: (article: Article) => Promise<void> | void;
+  currentUser?: AdminUser | null;
 }
 
 const PRESET_IMAGES = [
@@ -36,7 +38,8 @@ const PRESET_IMAGES = [
 export const PublishModal: React.FC<PublishModalProps> = ({
   isOpen,
   onClose,
-  onPublishSuccess
+  onPublishSuccess,
+  currentUser
 }) => {
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState<ArticleCategory>('Technology');
@@ -46,7 +49,7 @@ export const PublishModal: React.FC<PublishModalProps> = ({
   const [summary, setSummary] = useState('');
   const [content, setContent] = useState('');
   const [coverUrl, setCoverUrl] = useState(PRESET_IMAGES[0].url);
-  const [authorName, setAuthorName] = useState('Staff Writer');
+  const [authorName, setAuthorName] = useState(currentUser?.displayName || 'Contributor');
   const [tagsInput, setTagsInput] = useState('PulseNews, Tech');
   const [isMediaModalOpen, setIsMediaModalOpen] = useState(false);
   const editorRef = React.useRef<WpContentEditorRef>(null);
@@ -61,13 +64,13 @@ export const PublishModal: React.FC<PublishModalProps> = ({
       setSummary('');
       setContent('');
       setCoverUrl(PRESET_IMAGES[0].url);
-      setAuthorName('Staff Writer');
+      setAuthorName(currentUser?.displayName || 'Contributor');
       setTagsInput('PulseNews, Tech');
       setHoneypotTrap('');
       setPowUserAnswer('');
       setErrorMessage('');
     }
-  }, [isOpen]);
+  }, [isOpen, currentUser]);
 
   const handleCreateCategory = () => {
     const trimmed = newCategoryInput.trim();
@@ -172,36 +175,40 @@ export const PublishModal: React.FC<PublishModalProps> = ({
 
       const sanitizedContent = sanitizeHTML(content);
       const sanitizedTitle = sanitizeHTML(title);
-      const sanitizedSummary = sanitizeHTML(summary) || sanitizedContent.slice(0, 140) + '...';
+      const plainExcerpt = sanitizedContent.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+      const sanitizedSummary = sanitizeHTML(summary) || (plainExcerpt ? plainExcerpt.slice(0, 160) + '...' : sanitizedTitle);
 
       const tagsArray = tagsInput
         .split(',')
         .map(t => t.trim())
         .filter(t => t.length > 0);
 
+      const articleId = `art-user-${Date.now()}`;
       const newArticle: Article = {
-        id: `art-user-${Date.now()}`,
-        slug: title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)+/g, ''),
+        id: articleId,
+        slug: createVietnameseSlug(sanitizedTitle, articleId),
         title: sanitizedTitle,
         summary: sanitizedSummary,
         content: sanitizedContent,
         category,
         coverUrl,
         author: {
-          name: authorName.trim() || 'Contributor',
-          role: 'Staff Writer'
+          name: authorName.trim() || currentUser?.displayName || 'Contributor',
+          avatar: currentUser?.avatar,
+          role: currentUser?.role ? currentUser.role.replace('_', ' ').toUpperCase() : 'Contributor'
         },
         publishedAt: new Date().toISOString(),
         readTimeMinutes: Math.max(1, Math.ceil(sanitizedContent.split(' ').length / 200)),
         views: 1,
         likes: 0,
+        isFeatured: false,
         status: 'published',
         tags: tagsArray.length > 0 ? tagsArray : ['Trending'],
         commentsCount: 0,
         comments: []
       };
 
-      onPublishSuccess(newArticle);
+      await onPublishSuccess(newArticle);
       onClose();
     } catch (err: any) {
       setErrorMessage(err.message || 'Error publishing article.');

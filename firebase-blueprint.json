@@ -146,6 +146,149 @@
         }
       },
       "required": ["uid", "email", "grantedBy", "createdAt"]
+    },
+    "Article": {
+      "title": "Article",
+      "description": "Represents a news article published by a Contributor, Author, Editor, or Admin.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique article ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "slug": {
+          "type": "string",
+          "description": "URL-friendly permalink slug.",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "title": {
+          "type": "string",
+          "description": "Article headline.",
+          "minLength": 1,
+          "maxLength": 300
+        },
+        "summary": {
+          "type": "string",
+          "description": "Short excerpt summary.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "content": {
+          "type": "string",
+          "description": "Full HTML/Markdown article content.",
+          "minLength": 1,
+          "maxLength": 100000
+        },
+        "category": {
+          "type": "string",
+          "description": "Article category name.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "coverUrl": {
+          "type": "string",
+          "description": "Cover image URL.",
+          "minLength": 1,
+          "maxLength": 1000
+        },
+        "authorName": {
+          "type": "string",
+          "description": "Display name of the article author.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "authorRole": {
+          "type": "string",
+          "description": "Role label of the article author.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "authorAvatar": {
+          "type": "string",
+          "description": "Avatar URL of the author.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "authorUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user who created the article.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "publishedAt": {
+          "type": "string",
+          "description": "ISO timestamp when the article was published.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "readTimeMinutes": {
+          "type": "integer",
+          "description": "Estimated reading time in minutes."
+        },
+        "views": {
+          "type": "integer",
+          "description": "Total article view count."
+        },
+        "likes": {
+          "type": "integer",
+          "description": "Total article likes."
+        },
+        "isFeatured": {
+          "type": "boolean",
+          "description": "Whether the article is featured on the home page."
+        },
+        "status": {
+          "type": "string",
+          "description": "Publication status of the article.",
+          "enum": ["published", "draft"]
+        },
+        "tags": {
+          "type": "array",
+          "description": "Array of article hashtag strings (max 15)."
+        },
+        "commentsCount": {
+          "type": "integer",
+          "description": "Number of comments on the article."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the article was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the article was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "slug",
+        "title",
+        "summary",
+        "content",
+        "category",
+        "coverUrl",
+        "authorName",
+        "authorRole",
+        "authorAvatar",
+        "authorUid",
+        "publishedAt",
+        "readTimeMinutes",
+        "views",
+        "likes",
+        "isFeatured",
+        "status",
+        "tags",
+        "commentsCount",
+        "createdAt",
+        "updatedAt"
+      ]
     }
   },
   "firestore": {
@@ -160,6 +303,12 @@
         "$ref": "#/entities/AdminGrant"
       },
       "description": "Lookup collection of administrator UIDs for RBAC security rule checks."
+    },
+    "/articles/{articleId}": {
+      "schema": {
+        "$ref": "#/entities/Article"
+      },
+      "description": "Stores published and draft news articles synced across Admin and Public Web."
     }
   }
 }
