@@ -41,6 +41,7 @@ import {
   deleteUser, 
   togglePermission, 
   fetchUsersFromSupabase,
+  subscribeToManagedUsers,
   syncAuthenticatedGmailUser,
   DEFAULT_PERMISSIONS 
 } from '../services/userService';
@@ -91,8 +92,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [userToDelete, setUserToDelete] = useState<ManagedUser | null>(null);
   const [userSuccessMsg, setUserSuccessMsg] = useState('');
 
-  // Sync users list from Supabase & ensure current logged-in Gmail user is registered in list
+  // Sync users list from Firestore & ensure current logged-in Gmail user is registered in list
   useEffect(() => {
+    let unsub: (() => void) | null = null;
     const syncUsers = async () => {
       if (user?.email) {
         await syncAuthenticatedGmailUser({
@@ -108,8 +110,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       } else {
         setManagedUsers(getAllUsers());
       }
+      unsub = subscribeToManagedUsers((liveUsers) => {
+        setManagedUsers(liveUsers);
+      });
     };
     syncUsers();
+    return () => {
+      if (unsub) unsub();
+    };
   }, [user]);
 
   const [userForm, setUserForm] = useState<{

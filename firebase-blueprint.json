@@ -1,0 +1,165 @@
+{
+  "entities": {
+    "ManagedUser": {
+      "title": "ManagedUser",
+      "description": "Represents a registered CMS user or administrator authenticated via Google OAuth.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Document identifier matching user UID or sanitized admin-created ID.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the user or creator.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "username": {
+          "type": "string",
+          "description": "Short username handle.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Full display name of the staff member.",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified Gmail address of the user.",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "avatar": {
+          "type": "string",
+          "description": "URL to the user's profile avatar.",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "role": {
+          "type": "string",
+          "description": "RBAC role assigned to the user.",
+          "enum": ["super_admin", "admin", "editor", "author", "contributor"]
+        },
+        "status": {
+          "type": "string",
+          "description": "Account approval and access status.",
+          "enum": ["active", "pending", "suspended"]
+        },
+        "emailVerified": {
+          "type": "boolean",
+          "description": "Whether the Gmail account has been verified via Google OAuth."
+        },
+        "canPublishArticles": {
+          "type": "boolean",
+          "description": "Permission to publish articles."
+        },
+        "canEditArticles": {
+          "type": "boolean",
+          "description": "Permission to edit articles."
+        },
+        "canDeleteArticles": {
+          "type": "boolean",
+          "description": "Permission to delete articles."
+        },
+        "canManageCategories": {
+          "type": "boolean",
+          "description": "Permission to manage categories."
+        },
+        "canManageSettings": {
+          "type": "boolean",
+          "description": "Permission to manage site settings."
+        },
+        "canManageUsers": {
+          "type": "boolean",
+          "description": "Permission to manage users and permissions."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user record was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the user record was last updated."
+        }
+      },
+      "required": [
+        "id",
+        "uid",
+        "username",
+        "displayName",
+        "email",
+        "avatar",
+        "role",
+        "status",
+        "emailVerified",
+        "canPublishArticles",
+        "canEditArticles",
+        "canDeleteArticles",
+        "canManageCategories",
+        "canManageSettings",
+        "canManageUsers",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminGrant": {
+      "title": "AdminGrant",
+      "description": "Tracks explicitly granted administrator UIDs.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "UID of the admin user.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified email of the admin user.",
+          "minLength": 3,
+          "maxLength": 160
+        },
+        "grantedBy": {
+          "type": "string",
+          "description": "UID of the super admin who granted access.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when admin access was granted."
+        }
+      },
+      "required": ["uid", "email", "grantedBy", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/managed_users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/ManagedUser"
+      },
+      "description": "Stores registered CMS users, their approval status, and granular RBAC permissions."
+    },
+    "/admins/{adminId}": {
+      "schema": {
+        "$ref": "#/entities/AdminGrant"
+      },
+      "description": "Lookup collection of administrator UIDs for RBAC security rule checks."
+    }
+  }
+}

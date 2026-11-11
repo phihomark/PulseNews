@@ -1,10 +1,23 @@
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  setDoc,
+  updateDoc,
+  deleteDoc,
+  serverTimestamp,
+  onSnapshot,
+  Unsubscribe,
+} from 'firebase/firestore';
+import { signInWithPopup, signOut } from 'firebase/auth';
+import { auth, db, googleProvider, handleFirestoreError, OperationType } from '../firebase';
 import { ManagedUser, UserPermissions } from '../types';
 import { getSupabaseClient } from './supabaseService';
 
 const USERS_STORAGE_KEY = 'tintuc_managed_users_v1';
-const UNVERIFIED_EMAILS_KEY = 'tintuc_unverified_gmail_map';
-const CREDENTIALS_MAP_KEY = 'tintuc_gmail_auth_records_v1';
-const OTP_STORE_KEY = 'tintuc_gmail_otp_codes_v1';
+const MANAGED_USERS_COLLECTION = 'managed_users';
+const ADMINS_COLLECTION = 'admins';
 
 // Primary Super Admin Gmail (owner account)
 export const PRIMARY_SUPER_ADMIN_EMAILS = ['honguyen6492@gmail.com'];
@@ -54,125 +67,79 @@ export const DEFAULT_PERMISSIONS: Record<ManagedUser['role'], UserPermissions> =
 
 export const INITIAL_USERS: ManagedUser[] = [];
 
-interface StoredGmailAccount {
-  id: string;
-  email: string;
-  displayName: string;
-  passwordHash: string;
-  emailVerified: boolean;
-  createdAt: string;
+function sanitizeDocId(rawId: string): string {
+  const cleaned = rawId.trim().replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 128);
+  return cleaned || `user_${Date.now()}`;
 }
 
-interface StoredOtpRecord {
-  code: string;
-  expiresAt: number;
-}
+function mapFirestoreDocToManagedUser(docId: string, data: Record<string, any>): ManagedUser {
+  const role: ManagedUser['role'] =
+    data.role && ['super_admin', 'admin', 'editor', 'author', 'contributor'].includes(data.role)
+      ? data.role
+      : 'contributor';
+  const fallbackPerms = DEFAULT_PERMISSIONS[role] || DEFAULT_PERMISSIONS.contributor;
 
-function simpleHashPassword(pw: string, salt: string): string {
-  const combined = `${salt.toLowerCase()}::${pw}::pulsenews_salt`;
-  let hash = 5381;
-  for (let i = 0; i < combined.length; i++) {
-    hash = (hash * 33) ^ combined.charCodeAt(i);
+  let createdAtIso = new Date().toISOString();
+  if (data.createdAt?.toDate) {
+    createdAtIso = data.createdAt.toDate().toISOString();
+  } else if (typeof data.createdAt === 'string') {
+    createdAtIso = data.createdAt;
   }
-  return `h_${(hash >>> 0).toString(16)}_${combined.length}`;
-}
 
-function getStoredAccountsMap(): Record<string, StoredGmailAccount> {
-  try {
-    const raw = localStorage.getItem(CREDENTIALS_MAP_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveStoredAccountsMap(map: Record<string, StoredGmailAccount>): void {
-  try {
-    localStorage.setItem(CREDENTIALS_MAP_KEY, JSON.stringify(map));
-  } catch {}
-}
-
-function getOtpStore(): Record<string, StoredOtpRecord> {
-  try {
-    const raw = localStorage.getItem(OTP_STORE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-function saveOtpStore(store: Record<string, StoredOtpRecord>): void {
-  try {
-    localStorage.setItem(OTP_STORE_KEY, JSON.stringify(store));
-  } catch {}
-}
-
-export function generateOtpForEmail(email: string): string {
-  const clean = email.trim().toLowerCase();
-  const code = String(Math.floor(100000 + Math.random() * 900000));
-  const store = getOtpStore();
-  store[clean] = {
-    code,
-    expiresAt: Date.now() + 15 * 60 * 1000, // 15 minutes
+  return {
+    id: data.id || docId,
+    username: String(data.username || data.email?.split('@')[0] || 'user').slice(0, 64),
+    displayName: String(data.displayName || data.username || 'User').slice(0, 120),
+    email: String(data.email || '').trim().toLowerCase().slice(0, 160),
+    avatar: String(
+      data.avatar ||
+        `https://ui-avatars.com/api/?name=${encodeURIComponent(data.displayName || 'User')}&background=4f46e5&color=fff&bold=true`
+    ).slice(0, 500),
+    role,
+    status:
+      data.status && ['active', 'pending', 'suspended'].includes(data.status)
+        ? data.status
+        : 'pending',
+    emailVerified: Boolean(data.emailVerified ?? true),
+    createdAt: createdAtIso,
+    permissions: {
+      canPublishArticles: Boolean(data.canPublishArticles ?? fallbackPerms.canPublishArticles),
+      canEditArticles: Boolean(data.canEditArticles ?? fallbackPerms.canEditArticles),
+      canDeleteArticles: Boolean(data.canDeleteArticles ?? fallbackPerms.canDeleteArticles),
+      canManageCategories: Boolean(data.canManageCategories ?? fallbackPerms.canManageCategories),
+      canManageSettings: Boolean(data.canManageSettings ?? fallbackPerms.canManageSettings),
+      canManageUsers: Boolean(data.canManageUsers ?? fallbackPerms.canManageUsers),
+    },
   };
-  saveOtpStore(store);
-  return code;
 }
 
-export function verifyLocalOtpForEmail(email: string, inputCode: string): boolean {
-  const clean = email.trim().toLowerCase();
-  const store = getOtpStore();
-  const record = store[clean];
-  if (!record) return false;
-  if (Date.now() > record.expiresAt) return false;
-  if (record.code === inputCode.trim()) {
-    delete store[clean];
-    saveOtpStore(store);
-    return true;
-  }
-  return false;
-}
+function buildFirestoreCreatePayload(user: ManagedUser, uid: string) {
+  const safeId = sanitizeDocId(user.id);
+  const safeUid = sanitizeDocId(uid || user.id);
+  const emailPrefix = user.email.split('@')[0] || 'user';
+  const defaultAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(
+    user.displayName || emailPrefix
+  )}&background=4f46e5&color=fff&bold=true`;
 
-/**
- * Tracks emails that have registered but have NOT yet completed Gmail OTP / Link verification
- */
-export function markEmailPendingOtpVerification(email: string): void {
-  try {
-    const clean = email.trim().toLowerCase();
-    const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
-    const map: Record<string, boolean> = raw ? JSON.parse(raw) : {};
-    map[clean] = true;
-    localStorage.setItem(UNVERIFIED_EMAILS_KEY, JSON.stringify(map));
-  } catch {}
-}
-
-export function markEmailOtpVerified(email: string): void {
-  try {
-    const clean = email.trim().toLowerCase();
-    const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
-    if (raw) {
-      const map: Record<string, boolean> = JSON.parse(raw);
-      delete map[clean];
-      localStorage.setItem(UNVERIFIED_EMAILS_KEY, JSON.stringify(map));
-    }
-    const accounts = getStoredAccountsMap();
-    if (accounts[clean]) {
-      accounts[clean].emailVerified = true;
-      saveStoredAccountsMap(accounts);
-    }
-  } catch {}
-}
-
-export function isEmailPendingOtpVerification(email: string): boolean {
-  try {
-    const clean = email.trim().toLowerCase();
-    const raw = localStorage.getItem(UNVERIFIED_EMAILS_KEY);
-    if (!raw) return false;
-    const map: Record<string, boolean> = JSON.parse(raw);
-    return Boolean(map[clean]);
-  } catch {
-    return false;
-  }
+  return {
+    id: safeId,
+    uid: safeUid,
+    username: (user.username || emailPrefix).trim().slice(0, 64) || 'user',
+    displayName: (user.displayName || emailPrefix).trim().slice(0, 120) || 'User',
+    email: user.email.trim().toLowerCase().slice(0, 160),
+    avatar: (user.avatar || defaultAvatar).trim().slice(0, 500),
+    role: user.role,
+    status: user.status,
+    emailVerified: Boolean(user.emailVerified ?? true),
+    canPublishArticles: Boolean(user.permissions.canPublishArticles),
+    canEditArticles: Boolean(user.permissions.canEditArticles),
+    canDeleteArticles: Boolean(user.permissions.canDeleteArticles),
+    canManageCategories: Boolean(user.permissions.canManageCategories),
+    canManageSettings: Boolean(user.permissions.canManageSettings),
+    canManageUsers: Boolean(user.permissions.canManageUsers),
+    createdAt: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
 }
 
 export function getAllUsers(): ManagedUser[] {
@@ -197,11 +164,85 @@ export function saveAllUsers(users: ManagedUser[]): void {
 }
 
 /**
- * Fetches managed users from Supabase table `managed_users` if available
+ * Real-time subscription to Firestore `managed_users` collection for AdminDashboard
+ */
+export function subscribeToManagedUsers(
+  onUpdate: (users: ManagedUser[]) => void
+): Unsubscribe | null {
+  if (!auth.currentUser) return null;
+  const email = auth.currentUser.email?.trim().toLowerCase() || '';
+  if (!PRIMARY_SUPER_ADMIN_EMAILS.includes(email)) {
+    return null;
+  }
+
+  return onSnapshot(
+    collection(db, MANAGED_USERS_COLLECTION),
+    (snapshot) => {
+      const list: ManagedUser[] = [];
+      snapshot.forEach((docSnap) => {
+        list.push(mapFirestoreDocToManagedUser(docSnap.id, docSnap.data()));
+      });
+      list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+      saveAllUsers(list);
+      onUpdate(list);
+    },
+    (error) => {
+      handleFirestoreError(error, OperationType.LIST, MANAGED_USERS_COLLECTION);
+    }
+  );
+}
+
+/**
+ * Fetches managed users from Firestore `managed_users` (and merges with optional Supabase)
  */
 export async function fetchUsersFromSupabase(): Promise<ManagedUser[] | null> {
+  // 1. If authenticated as Super Admin in Firebase, fetch from Firestore `managed_users`
+  if (auth.currentUser) {
+    const currentEmail = auth.currentUser.email?.trim().toLowerCase() || '';
+    if (PRIMARY_SUPER_ADMIN_EMAILS.includes(currentEmail)) {
+      try {
+        const snap = await getDocs(collection(db, MANAGED_USERS_COLLECTION));
+        const firestoreUsers: ManagedUser[] = [];
+        snap.forEach((docSnap) => {
+          firestoreUsers.push(mapFirestoreDocToManagedUser(docSnap.id, docSnap.data()));
+        });
+        if (firestoreUsers.length > 0) {
+          firestoreUsers.sort(
+            (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
+          );
+          saveAllUsers(firestoreUsers);
+          return firestoreUsers;
+        }
+      } catch (error) {
+        handleFirestoreError(error, OperationType.LIST, MANAGED_USERS_COLLECTION);
+      }
+    } else {
+      // Non-super-admin can read their own user doc
+      try {
+        const ownDoc = await getDoc(doc(db, MANAGED_USERS_COLLECTION, auth.currentUser.uid));
+        if (ownDoc.exists()) {
+          const ownUser = mapFirestoreDocToManagedUser(ownDoc.id, ownDoc.data());
+          const local = getAllUsers();
+          const merged = [
+            ownUser,
+            ...local.filter((u) => u.email.toLowerCase() !== ownUser.email.toLowerCase()),
+          ];
+          saveAllUsers(merged);
+          return merged;
+        }
+      } catch (error) {
+        handleFirestoreError(
+          error,
+          OperationType.GET,
+          `${MANAGED_USERS_COLLECTION}/${auth.currentUser.uid}`
+        );
+      }
+    }
+  }
+
+  // 2. Fallback to Supabase if configured
   const client = getSupabaseClient();
-  if (!client) return null;
+  if (!client) return getAllUsers();
 
   try {
     const { data, error } = await client
@@ -209,285 +250,50 @@ export async function fetchUsersFromSupabase(): Promise<ManagedUser[] | null> {
       .select('*')
       .order('createdAt', { ascending: false });
 
-    if (error || !data) return null;
+    if (error || !data) return getAllUsers();
 
-    const users = (data as ManagedUser[]).map(u => ({
+    const users = (data as ManagedUser[]).map((u) => ({
       ...u,
-      permissions: u.permissions || { ...(DEFAULT_PERMISSIONS[u.role] || DEFAULT_PERMISSIONS.contributor) }
+      permissions: u.permissions || {
+        ...(DEFAULT_PERMISSIONS[u.role] || DEFAULT_PERMISSIONS.contributor),
+      },
     }));
     if (users.length > 0) {
-      // Merge remote users with any local users
-      const local = getAllUsers();
-      const mergedMap = new Map<string, ManagedUser>();
-      local.forEach(lu => mergedMap.set(lu.email.trim().toLowerCase(), lu));
-      users.forEach(ru => mergedMap.set(ru.email.trim().toLowerCase(), ru));
-      const merged = Array.from(mergedMap.values());
-      saveAllUsers(merged);
-      return merged;
+      saveAllUsers(users);
+      return users;
     }
-    return users;
+    return getAllUsers();
   } catch {
-    return null;
+    return getAllUsers();
   }
 }
 
 /**
- * Upserts a single ManagedUser to Supabase `managed_users`
+ * Triggers real Google OAuth popup sign-in via Firebase Auth and syncs user to Firestore
  */
-export async function upsertUserToSupabase(user: ManagedUser): Promise<boolean> {
-  const client = getSupabaseClient();
-  if (!client) return false;
-
-  try {
-    const { error } = await client
-      .from('managed_users')
-      .upsert([user], { onConflict: 'email' });
-    return !error;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Deletes a ManagedUser from Supabase `managed_users`
- */
-export async function deleteUserFromSupabase(id: string): Promise<boolean> {
-  const client = getSupabaseClient();
-  if (!client) return false;
-
-  try {
-    const { error } = await client
-      .from('managed_users')
-      .delete()
-      .eq('id', id);
-    return !error;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Registers a new Gmail user, generates a 6-digit OTP verification code,
- * and syncs with Supabase Auth (if configured) + ManagedUser list.
- */
-export async function registerGmailUserWithOtp(params: {
-  displayName: string;
-  email: string;
-  password: string;
-}): Promise<{
-  success: boolean;
-  otpCode: string;
-  emailSentViaSupabase: boolean;
-  error?: string;
+export async function signInWithGoogleOAuthPopup(): Promise<{
+  user: ManagedUser;
+  isSuspended: boolean;
+  isPendingApproval: boolean;
 }> {
-  const cleanEmail = params.email.trim().toLowerCase();
-  const cleanName = params.displayName.trim();
-  const emailPrefix = cleanEmail.split('@')[0] || 'user';
+  const credential = await signInWithPopup(auth, googleProvider);
+  const fbUser = credential.user;
 
-  // Generate 6-digit OTP code for verification
-  const otpCode = generateOtpForEmail(cleanEmail);
-  markEmailPendingOtpVerification(cleanEmail);
-
-  // Save hashed credentials locally so login works reliably even without external SMTP
-  const accounts = getStoredAccountsMap();
-  const userId = accounts[cleanEmail]?.id || `user-${Date.now()}`;
-  accounts[cleanEmail] = {
-    id: userId,
-    email: cleanEmail,
-    displayName: cleanName,
-    passwordHash: simpleHashPassword(params.password, cleanEmail),
-    emailVerified: false,
-    createdAt: accounts[cleanEmail]?.createdAt || new Date().toISOString(),
-  };
-  saveStoredAccountsMap(accounts);
-
-  // Also pre-create the user in managed_users as 'pending' (or 'active' if Primary Super Admin)
-  const isPrimarySuperAdmin = PRIMARY_SUPER_ADMIN_EMAILS.includes(cleanEmail);
-  const currentUsers = getAllUsers();
-  const existing = currentUsers.find(u => u.email.trim().toLowerCase() === cleanEmail);
-
-  const initialRole: ManagedUser['role'] = isPrimarySuperAdmin
-    ? 'super_admin'
-    : existing?.role || 'contributor';
-  const initialStatus: ManagedUser['status'] = isPrimarySuperAdmin
-    ? 'active'
-    : existing?.status || 'pending';
-
-  const managedRecord: ManagedUser = {
-    id: existing?.id || userId,
-    username: existing?.username || emailPrefix,
-    displayName: cleanName || existing?.displayName || emailPrefix,
-    email: cleanEmail,
-    avatar:
-      existing?.avatar ||
-      `https://ui-avatars.com/api/?name=${encodeURIComponent(cleanName || emailPrefix)}&background=4f46e5&color=fff&bold=true`,
-    role: initialRole,
-    status: initialStatus,
-    emailVerified: false,
-    createdAt: existing?.createdAt || new Date().toISOString(),
-    permissions: isPrimarySuperAdmin
-      ? { ...DEFAULT_PERMISSIONS.super_admin }
-      : existing?.permissions || { ...DEFAULT_PERMISSIONS[initialRole] },
-  };
-
-  const nextUsers = existing
-    ? currentUsers.map(u => (u.email.trim().toLowerCase() === cleanEmail ? managedRecord : u))
-    : [managedRecord, ...currentUsers];
-  saveAllUsers(nextUsers);
-  upsertUserToSupabase(managedRecord);
-
-  // Try Supabase Auth signUp if Supabase is configured
-  let emailSentViaSupabase = false;
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
-      const { data, error } = await supabase.auth.signUp({
-        email: cleanEmail,
-        password: params.password,
-        options: {
-          emailRedirectTo: `${window.location.origin}/admin`,
-          data: { full_name: cleanName },
-        },
-      });
-
-      if (!error) {
-        if (data.session) {
-          // Confirm email was off in Supabase dashboard -> sign out temporary session & trigger OTP email
-          await supabase.auth.signOut();
-          const { error: otpErr } = await supabase.auth.signInWithOtp({
-            email: cleanEmail,
-            options: {
-              shouldCreateUser: false,
-              emailRedirectTo: `${window.location.origin}/admin`,
-            },
-          });
-          emailSentViaSupabase = !otpErr;
-        } else {
-          emailSentViaSupabase = true;
-        }
-      }
-    } catch {
-      // Fallback to built-in OTP verification
-    } finally {
-      sessionStorage.removeItem('suppress_auto_auth_listener');
-    }
+  if (!fbUser || !fbUser.email) {
+    await signOut(auth);
+    throw new Error('Không thể lấy thông tin địa chỉ Gmail từ tài khoản Google của bạn.');
   }
 
-  return {
-    success: true,
-    otpCode,
-    emailSentViaSupabase,
-  };
+  return await syncAuthenticatedGmailUser({
+    id: fbUser.uid,
+    email: fbUser.email,
+    displayName: fbUser.displayName || fbUser.email.split('@')[0],
+    avatar: fbUser.photoURL || undefined,
+  });
 }
 
 /**
- * Authenticates Gmail + Password against Supabase Auth (if connected) and local encrypted store
- */
-export async function authenticateGmailPassword(params: {
-  email: string;
-  password: string;
-}): Promise<{
-  success: boolean;
-  needsOtpVerification?: boolean;
-  otpCode?: string;
-  user?: { id: string; email: string; displayName: string; avatar?: string };
-  errorMessage?: string;
-}> {
-  const cleanEmail = params.email.trim().toLowerCase();
-
-  // 1. Check if this email has a pending unverified OTP registration
-  if (isEmailPendingOtpVerification(cleanEmail)) {
-    const newOtp = generateOtpForEmail(cleanEmail);
-    return {
-      success: false,
-      needsOtpVerification: true,
-      otpCode: newOtp,
-    };
-  }
-
-  // 2. Check local registered Gmail credentials first
-  const accounts = getStoredAccountsMap();
-  const localAccount = accounts[cleanEmail];
-
-  if (localAccount) {
-    const expectedHash = simpleHashPassword(params.password, cleanEmail);
-    if (localAccount.passwordHash !== expectedHash) {
-      return {
-        success: false,
-        errorMessage: 'Mật khẩu không chính xác. Vui lòng kiểm tra lại hoặc bấm "Nhận OTP qua Gmail".',
-      };
-    }
-
-    if (!localAccount.emailVerified) {
-      markEmailPendingOtpVerification(cleanEmail);
-      const newOtp = generateOtpForEmail(cleanEmail);
-      return {
-        success: false,
-        needsOtpVerification: true,
-        otpCode: newOtp,
-      };
-    }
-
-    return {
-      success: true,
-      user: {
-        id: localAccount.id,
-        email: localAccount.email,
-        displayName: localAccount.displayName,
-      },
-    };
-  }
-
-  // 3. Try Supabase Auth if configured
-  const supabase = getSupabaseClient();
-  if (supabase) {
-    try {
-      sessionStorage.setItem('suppress_auto_auth_listener', 'true');
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: cleanEmail,
-        password: params.password,
-      });
-      sessionStorage.removeItem('suppress_auto_auth_listener');
-
-      if (!error && data.user) {
-        return {
-          success: true,
-          user: {
-            id: data.user.id,
-            email: data.user.email || cleanEmail,
-            displayName:
-              data.user.user_metadata?.full_name ||
-              data.user.user_metadata?.name ||
-              cleanEmail.split('@')[0],
-            avatar: data.user.user_metadata?.avatar_url,
-          },
-        };
-      }
-
-      if (error?.message.toLowerCase().includes('email not confirmed')) {
-        markEmailPendingOtpVerification(cleanEmail);
-        const newOtp = generateOtpForEmail(cleanEmail);
-        return {
-          success: false,
-          needsOtpVerification: true,
-          otpCode: newOtp,
-        };
-      }
-    } catch {
-      sessionStorage.removeItem('suppress_auto_auth_listener');
-    }
-  }
-
-  return {
-    success: false,
-    errorMessage:
-      'Tài khoản Gmail này chưa được đăng ký hoặc mật khẩu không đúng. Vui lòng chuyển sang tab "Đăng ký bằng Gmail" để tạo tài khoản mới!',
-  };
-}
-
-/**
- * Syncs a verified Gmail user (after OTP / Email Link / Google OAuth verification) with `managed_users`
+ * Syncs a verified Google OAuth user with Firestore `managed_users/{uid}`
  */
 export async function syncAuthenticatedGmailUser(params: {
   id: string;
@@ -497,53 +303,122 @@ export async function syncAuthenticatedGmailUser(params: {
 }): Promise<{ user: ManagedUser; isSuspended: boolean; isPendingApproval: boolean }> {
   const cleanEmail = params.email.trim().toLowerCase();
   const emailPrefix = cleanEmail.split('@')[0] || 'user';
+  const safeId = sanitizeDocId(params.id || auth.currentUser?.uid || `user_${Date.now()}`);
   const defaultAvatar =
     params.avatar ||
-    `https://ui-avatars.com/api/?name=${encodeURIComponent(params.displayName || emailPrefix)}&background=4f46e5&color=fff&bold=true`;
-
-  // 1. Fetch latest users from Supabase if connected
-  const remoteUsers = await fetchUsersFromSupabase();
-  const currentUsers = remoteUsers && remoteUsers.length > 0 ? remoteUsers : getAllUsers();
+    `https://ui-avatars.com/api/?name=${encodeURIComponent(
+      params.displayName || emailPrefix
+    )}&background=4f46e5&color=fff&bold=true`;
 
   const isPrimarySuperAdmin = PRIMARY_SUPER_ADMIN_EMAILS.includes(cleanEmail);
 
-  // 2. Check if this Gmail already exists in managed_users
-  const existing = currentUsers.find(u => u.email.trim().toLowerCase() === cleanEmail);
+  // If authenticated with Firebase Auth, read/write Firestore `managed_users/{safeId}`
+  if (auth.currentUser && auth.currentUser.uid === safeId) {
+    const userDocRef = doc(db, MANAGED_USERS_COLLECTION, safeId);
+    let existingSnap;
+    try {
+      existingSnap = await getDoc(userDocRef);
+    } catch (error) {
+      handleFirestoreError(error, OperationType.GET, `${MANAGED_USERS_COLLECTION}/${safeId}`);
+    }
 
-  if (existing) {
-    const updatedUser: ManagedUser = {
-      ...existing,
-      displayName: existing.displayName || params.displayName || emailPrefix,
-      avatar: existing.avatar || defaultAvatar,
+    if (existingSnap && existingSnap.exists()) {
+      const existingUser = mapFirestoreDocToManagedUser(existingSnap.id, existingSnap.data());
+
+      // If primary owner email, ensure super_admin + active in Firestore if not already set
+      if (
+        isPrimarySuperAdmin &&
+        (existingUser.role !== 'super_admin' || existingUser.status !== 'active')
+      ) {
+        try {
+          await updateDoc(userDocRef, {
+            role: 'super_admin',
+            status: 'active',
+            canPublishArticles: true,
+            canEditArticles: true,
+            canDeleteArticles: true,
+            canManageCategories: true,
+            canManageSettings: true,
+            canManageUsers: true,
+            updatedAt: serverTimestamp(),
+          });
+        } catch (error) {
+          handleFirestoreError(
+            error,
+            OperationType.UPDATE,
+            `${MANAGED_USERS_COLLECTION}/${safeId}`
+          );
+        }
+        existingUser.role = 'super_admin';
+        existingUser.status = 'active';
+        existingUser.permissions = { ...DEFAULT_PERMISSIONS.super_admin };
+      }
+
+      const currentLocal = getAllUsers();
+      const updatedLocal = [
+        existingUser,
+        ...currentLocal.filter((u) => u.email.toLowerCase() !== cleanEmail && u.id !== safeId),
+      ];
+      saveAllUsers(updatedLocal);
+
+      return {
+        user: existingUser,
+        isSuspended: existingUser.status === 'suspended',
+        isPendingApproval: existingUser.status === 'pending',
+      };
+    }
+
+    // Document does not exist yet -> Create new user in Firestore
+    const initialRole: ManagedUser['role'] = isPrimarySuperAdmin ? 'super_admin' : 'contributor';
+    const initialStatus: ManagedUser['status'] = isPrimarySuperAdmin ? 'active' : 'pending';
+    const newUser: ManagedUser = {
+      id: safeId,
+      username: emailPrefix.slice(0, 64),
+      displayName: (params.displayName?.trim() || emailPrefix).slice(0, 120),
+      email: cleanEmail.slice(0, 160),
+      avatar: defaultAvatar.slice(0, 500),
+      role: initialRole,
+      status: initialStatus,
       emailVerified: true,
-      role: isPrimarySuperAdmin ? 'super_admin' : existing.role,
-      status: isPrimarySuperAdmin ? 'active' : existing.status,
-      permissions: isPrimarySuperAdmin
-        ? { ...DEFAULT_PERMISSIONS.super_admin }
-        : existing.permissions || { ...DEFAULT_PERMISSIONS[existing.role] },
+      createdAt: new Date().toISOString(),
+      permissions: { ...DEFAULT_PERMISSIONS[initialRole] },
     };
 
-    const nextList = currentUsers.map(u =>
-      u.email.trim().toLowerCase() === cleanEmail ? updatedUser : u
-    );
-    saveAllUsers(nextList);
-    await upsertUserToSupabase(updatedUser);
+    try {
+      await setDoc(userDocRef, buildFirestoreCreatePayload(newUser, safeId));
+    } catch (error) {
+      handleFirestoreError(error, OperationType.CREATE, `${MANAGED_USERS_COLLECTION}/${safeId}`);
+    }
+
+    const currentLocal = getAllUsers();
+    const updatedLocal = [
+      newUser,
+      ...currentLocal.filter((u) => u.email.toLowerCase() !== cleanEmail && u.id !== safeId),
+    ];
+    saveAllUsers(updatedLocal);
 
     return {
-      user: updatedUser,
-      isSuspended: updatedUser.status === 'suspended',
-      isPendingApproval: updatedUser.status === 'pending',
+      user: newUser,
+      isSuspended: false,
+      isPendingApproval: initialStatus === 'pending',
     };
   }
 
-  // 3. New Gmail account registering for the first time
-  // Only the primary owner Gmail becomes 'active' super_admin automatically;
-  // other self-registered accounts start as 'pending' until approved by an Admin in User Management.
+  // Fallback for local/session sync
+  const currentUsers = getAllUsers();
+  const existing = currentUsers.find((u) => u.email.trim().toLowerCase() === cleanEmail);
+  if (existing) {
+    return {
+      user: existing,
+      isSuspended: existing.status === 'suspended',
+      isPendingApproval: existing.status === 'pending',
+    };
+  }
+
   const initialRole: ManagedUser['role'] = isPrimarySuperAdmin ? 'super_admin' : 'contributor';
   const initialStatus: ManagedUser['status'] = isPrimarySuperAdmin ? 'active' : 'pending';
-
-  const newUser: ManagedUser = {
-    id: params.id || `user-${Date.now()}`,
+  const fallbackUser: ManagedUser = {
+    id: safeId,
     username: emailPrefix,
     displayName: params.displayName?.trim() || emailPrefix,
     email: cleanEmail,
@@ -554,27 +429,60 @@ export async function syncAuthenticatedGmailUser(params: {
     createdAt: new Date().toISOString(),
     permissions: { ...DEFAULT_PERMISSIONS[initialRole] },
   };
-
-  const updatedList = [newUser, ...currentUsers];
-  saveAllUsers(updatedList);
-  await upsertUserToSupabase(newUser);
-
+  saveAllUsers([fallbackUser, ...currentUsers]);
   return {
-    user: newUser,
+    user: fallbackUser,
     isSuspended: false,
     isPendingApproval: initialStatus === 'pending',
   };
 }
 
+/**
+ * Syncs admin status in `/admins/{uid}` when Super Admin promotes/demotes a user
+ */
+async function syncAdminGrantInFirestore(user: ManagedUser): Promise<void> {
+  if (!auth.currentUser) return;
+  const currentEmail = auth.currentUser.email?.trim().toLowerCase() || '';
+  if (!PRIMARY_SUPER_ADMIN_EMAILS.includes(currentEmail)) return;
+
+  const safeId = sanitizeDocId(user.id);
+  const adminDocRef = doc(db, ADMINS_COLLECTION, safeId);
+
+  try {
+    const snap = await getDoc(adminDocRef);
+    const shouldBeAdmin =
+      user.status === 'active' && (user.role === 'admin' || user.role === 'super_admin');
+
+    if (shouldBeAdmin && !snap.exists()) {
+      await setDoc(adminDocRef, {
+        uid: safeId,
+        email: user.email.trim().toLowerCase().slice(0, 160),
+        grantedBy: auth.currentUser.uid,
+        createdAt: serverTimestamp(),
+      });
+    } else if (!shouldBeAdmin && snap.exists()) {
+      await deleteDoc(adminDocRef);
+    }
+  } catch (error) {
+    console.warn('Could not sync admin grant doc:', error);
+  }
+}
+
 export function createUser(user: Omit<ManagedUser, 'id' | 'createdAt'>): ManagedUser[] {
   const current = getAllUsers();
   const cleanEmail = user.email.trim().toLowerCase();
-  const existingIdx = current.findIndex(u => u.email.trim().toLowerCase() === cleanEmail);
+  const existingIdx = current.findIndex((u) => u.email.trim().toLowerCase() === cleanEmail);
+
+  const safeId =
+    existingIdx >= 0
+      ? sanitizeDocId(current[existingIdx].id)
+      : sanitizeDocId(`user_${Date.now()}`);
 
   const newUser: ManagedUser = {
     ...user,
     email: cleanEmail,
-    id: existingIdx >= 0 ? current[existingIdx].id : `user-${Date.now()}`,
+    id: safeId,
+    emailVerified: true,
     createdAt: existingIdx >= 0 ? current[existingIdx].createdAt : new Date().toISOString(),
   };
 
@@ -584,54 +492,112 @@ export function createUser(user: Omit<ManagedUser, 'id' | 'createdAt'>): Managed
       : [newUser, ...current];
 
   saveAllUsers(updated);
-  upsertUserToSupabase(newUser);
+
+  if (auth.currentUser) {
+    const userDocRef = doc(db, MANAGED_USERS_COLLECTION, safeId);
+    const creatorUid = auth.currentUser.uid;
+    getDoc(userDocRef)
+      .then(async (snap) => {
+        if (snap.exists()) {
+          await updateDoc(userDocRef, {
+            username: newUser.username.trim().slice(0, 64),
+            displayName: newUser.displayName.trim().slice(0, 120),
+            email: newUser.email.trim().toLowerCase().slice(0, 160),
+            avatar: newUser.avatar.trim().slice(0, 500),
+            role: newUser.role,
+            status: newUser.status,
+            emailVerified: true,
+            canPublishArticles: Boolean(newUser.permissions.canPublishArticles),
+            canEditArticles: Boolean(newUser.permissions.canEditArticles),
+            canDeleteArticles: Boolean(newUser.permissions.canDeleteArticles),
+            canManageCategories: Boolean(newUser.permissions.canManageCategories),
+            canManageSettings: Boolean(newUser.permissions.canManageSettings),
+            canManageUsers: Boolean(newUser.permissions.canManageUsers),
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          await setDoc(userDocRef, buildFirestoreCreatePayload(newUser, creatorUid));
+        }
+        await syncAdminGrantInFirestore(newUser);
+      })
+      .catch((error) => {
+        handleFirestoreError(error, OperationType.WRITE, `${MANAGED_USERS_COLLECTION}/${safeId}`);
+      });
+  }
+
   return updated;
 }
 
 export function updateUser(id: string, updates: Partial<ManagedUser>): ManagedUser[] {
   const current = getAllUsers();
   let updatedTarget: ManagedUser | null = null;
-  const updated = current.map(u => {
+  const updated = current.map((u) => {
     if (u.id === id) {
-      updatedTarget = { ...u, ...updates };
-      return updatedTarget;
-    }
-    return u;
-  });
-  saveAllUsers(updated);
-  if (updatedTarget) {
-    upsertUserToSupabase(updatedTarget);
-  }
-  return updated;
-}
-
-export function deleteUser(id: string): ManagedUser[] {
-  const current = getAllUsers();
-  const updated = current.filter(u => u.id !== id);
-  saveAllUsers(updated);
-  deleteUserFromSupabase(id);
-  return updated;
-}
-
-export function togglePermission(userId: string, permKey: keyof UserPermissions): ManagedUser[] {
-  const current = getAllUsers();
-  let updatedTarget: ManagedUser | null = null;
-  const updated = current.map(u => {
-    if (u.id === userId) {
       updatedTarget = {
         ...u,
-        permissions: {
-          ...u.permissions,
-          [permKey]: !u.permissions[permKey],
-        },
+        ...updates,
+        permissions: updates.permissions ? { ...updates.permissions } : { ...u.permissions },
       };
       return updatedTarget;
     }
     return u;
   });
   saveAllUsers(updated);
-  if (updatedTarget) {
-    upsertUserToSupabase(updatedTarget);
+
+  if (updatedTarget && auth.currentUser) {
+    const target = updatedTarget as ManagedUser;
+    const safeId = sanitizeDocId(target.id);
+    const userDocRef = doc(db, MANAGED_USERS_COLLECTION, safeId);
+
+    updateDoc(userDocRef, {
+      username: target.username.trim().slice(0, 64),
+      displayName: target.displayName.trim().slice(0, 120),
+      email: target.email.trim().toLowerCase().slice(0, 160),
+      avatar: target.avatar.trim().slice(0, 500),
+      role: target.role,
+      status: target.status,
+      emailVerified: Boolean(target.emailVerified ?? true),
+      canPublishArticles: Boolean(target.permissions.canPublishArticles),
+      canEditArticles: Boolean(target.permissions.canEditArticles),
+      canDeleteArticles: Boolean(target.permissions.canDeleteArticles),
+      canManageCategories: Boolean(target.permissions.canManageCategories),
+      canManageSettings: Boolean(target.permissions.canManageSettings),
+      canManageUsers: Boolean(target.permissions.canManageUsers),
+      updatedAt: serverTimestamp(),
+    })
+      .then(() => syncAdminGrantInFirestore(target))
+      .catch((error) => {
+        handleFirestoreError(error, OperationType.UPDATE, `${MANAGED_USERS_COLLECTION}/${safeId}`);
+      });
   }
+
   return updated;
+}
+
+export function deleteUser(id: string): ManagedUser[] {
+  const current = getAllUsers();
+  const updated = current.filter((u) => u.id !== id);
+  saveAllUsers(updated);
+
+  if (auth.currentUser) {
+    const safeId = sanitizeDocId(id);
+    deleteDoc(doc(db, MANAGED_USERS_COLLECTION, safeId)).catch((error) => {
+      handleFirestoreError(error, OperationType.DELETE, `${MANAGED_USERS_COLLECTION}/${safeId}`);
+    });
+  }
+
+  return updated;
+}
+
+export function togglePermission(userId: string, permKey: keyof UserPermissions): ManagedUser[] {
+  const current = getAllUsers();
+  const target = current.find((u) => u.id === userId);
+  if (!target) return current;
+
+  const nextPermissions: UserPermissions = {
+    ...target.permissions,
+    [permKey]: !target.permissions[permKey],
+  };
+
+  return updateUser(userId, { permissions: nextPermissions });
 }

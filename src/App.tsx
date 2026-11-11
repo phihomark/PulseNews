@@ -14,6 +14,8 @@ import { AdminDashboard } from './components/AdminDashboard';
 import { PerformanceWidget } from './components/PerformanceWidget';
 import { INITIAL_ARTICLES } from './data/initialArticles';
 import { Article, ArticleCategory, AdminUser } from './types';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { auth } from './firebase';
 import { 
   getSupabaseClient,
   fetchArticlesFromSupabase, 
@@ -22,9 +24,7 @@ import {
   deleteArticleFromSupabase 
 } from './services/supabaseService';
 import {
-  syncAuthenticatedGmailUser,
-  isEmailPendingOtpVerification,
-  markEmailOtpVerified
+  syncAuthenticatedGmailUser
 } from './services/userService';
 import { getSiteSettings, SiteSettings } from './services/siteSettingsService';
 import { Flame, Sparkles, ShieldCheck, Newspaper, AlertCircle, ArrowUpRight } from 'lucide-react';
@@ -135,98 +135,57 @@ export default function AppContent() {
     loadFromSupabase();
   }, []);
 
-  // Listen to Supabase Auth (Gmail Confirmation Link / Google OAuth redirect / Active Session)
+  // Listen to Firebase Auth (Google OAuth Session)
   useEffect(() => {
-    const supabase = getSupabaseClient();
-    if (!supabase) return;
-
-    const handleSessionUser = async (sessionUser: any, isRedirectCallback: boolean) => {
-      // Never hijack form flows (e.g., signUp / signInWithPassword inside AdminLogin)
+    const unsubscribe = onAuthStateChanged(auth, async (fbUser) => {
       if (sessionStorage.getItem('suppress_auto_auth_listener') === 'true') {
         return;
       }
-      if (!sessionUser?.email) return;
 
-      const cleanEmail = sessionUser.email.trim().toLowerCase();
-
-      // If arriving from a real Gmail confirmation link (#access_token=...) or Google OAuth, mark verified
-      if (isRedirectCallback || sessionUser.app_metadata?.provider === 'google') {
-        markEmailOtpVerified(cleanEmail);
-      }
-
-      // If email is still awaiting OTP verification, do NOT auto-login
-      if (isEmailPendingOtpVerification(cleanEmail)) {
-        return;
-      }
-
-      const { user: managedUser, isSuspended, isPendingApproval } =
-        await syncAuthenticatedGmailUser({
-          id: sessionUser.id,
-          email: cleanEmail,
-          displayName:
-            sessionUser.user_metadata?.full_name ||
-            sessionUser.user_metadata?.name ||
-            cleanEmail.split('@')[0],
-          avatar: sessionUser.user_metadata?.avatar_url
-        });
-
-      if (isSuspended || isPendingApproval) {
-        await supabase.auth.signOut();
+      if (!fbUser || !fbUser.email) {
         localStorage.removeItem('tintuc_admin_session');
         setAdminUser(null);
         setIsAdminDashboardView(false);
         return;
       }
 
-      const syncedAdmin: AdminUser = {
-        id: managedUser.id,
-        username: managedUser.username,
-        displayName: managedUser.displayName,
-        email: managedUser.email,
-        avatar: managedUser.avatar,
-        role: managedUser.role,
-        status: managedUser.status,
-        emailVerified: true,
-        permissions: managedUser.permissions
-      };
+      try {
+        const { user: managedUser, isSuspended, isPendingApproval } =
+          await syncAuthenticatedGmailUser({
+            id: fbUser.uid,
+            email: fbUser.email,
+            displayName: fbUser.displayName || fbUser.email.split('@')[0],
+            avatar: fbUser.photoURL || undefined,
+          });
 
-      localStorage.setItem('tintuc_admin_session', JSON.stringify(syncedAdmin));
-      setAdminUser(syncedAdmin);
-
-      if (isRedirectCallback || window.location.pathname === '/admin') {
-        setIsAdminLoginOpen(false);
-        setIsAdminDashboardView(true);
-      }
-    };
-
-    const hasAuthHashOnBoot = window.location.hash.includes('access_token=');
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      if (session?.user) {
-        handleSessionUser(session.user, hasAuthHashOnBoot);
-      }
-    });
-
-    const { data: authListener } = supabase.auth.onAuthStateChange((event, session) => {
-      if (sessionStorage.getItem('suppress_auto_auth_listener') === 'true') {
-        return;
-      }
-      if (event === 'SIGNED_IN' && session?.user) {
-        const isCallback =
-          window.location.hash.includes('access_token=') ||
-          session.user.app_metadata?.provider === 'google';
-        if (isCallback) {
-          handleSessionUser(session.user, true);
+        if (isSuspended || isPendingApproval) {
+          await signOut(auth);
+          localStorage.removeItem('tintuc_admin_session');
+          setAdminUser(null);
+          setIsAdminDashboardView(false);
+          return;
         }
-      } else if (event === 'SIGNED_OUT') {
-        localStorage.removeItem('tintuc_admin_session');
-        setAdminUser(null);
-        setIsAdminDashboardView(false);
+
+        const syncedAdmin: AdminUser = {
+          id: managedUser.id,
+          username: managedUser.username,
+          displayName: managedUser.displayName,
+          email: managedUser.email,
+          avatar: managedUser.avatar,
+          role: managedUser.role,
+          status: managedUser.status,
+          emailVerified: true,
+          permissions: managedUser.permissions,
+        };
+
+        localStorage.setItem('tintuc_admin_session', JSON.stringify(syncedAdmin));
+        setAdminUser(syncedAdmin);
+      } catch (err) {
+        console.warn('Error syncing Firebase Auth user:', err);
       }
     });
 
-    return () => {
-      authListener.subscription.unsubscribe();
-    };
+    return () => unsubscribe();
   }, []);
 
   // Save articles to LocalStorage whenever modified
@@ -330,6 +289,9 @@ export default function AppContent() {
   };
 
   const handleAdminLogout = async () => {
+    try {
+      await signOut(auth);
+    } catch {}
     const supabase = getSupabaseClient();
     if (supabase) {
       await supabase.auth.signOut();

@@ -1,0 +1,185 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 0: Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Core Primitives
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isSuperAdminEmail() {
+      return isSignedIn() && request.auth.token.email == 'honguyen6492@gmail.com';
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        isSuperAdminEmail() ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Entity Validation Blueprint: ManagedUser
+    function isValidManagedUser(data) {
+      return data.keys().hasAll([
+        'id',
+        'uid',
+        'username',
+        'displayName',
+        'email',
+        'avatar',
+        'role',
+        'status',
+        'emailVerified',
+        'canPublishArticles',
+        'canEditArticles',
+        'canDeleteArticles',
+        'canManageCategories',
+        'canManageSettings',
+        'canManageUsers',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'id',
+        'uid',
+        'username',
+        'displayName',
+        'email',
+        'avatar',
+        'role',
+        'status',
+        'emailVerified',
+        'canPublishArticles',
+        'canEditArticles',
+        'canDeleteArticles',
+        'canManageCategories',
+        'canManageSettings',
+        'canManageUsers',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      isValidId(data.id) &&
+      isValidId(data.uid) &&
+      data.username is string && data.username.size() >= 1 && data.username.size() <= 64 &&
+      data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120 &&
+      data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+      data.avatar is string && data.avatar.size() >= 1 && data.avatar.size() <= 500 &&
+      data.role in ['super_admin', 'admin', 'editor', 'author', 'contributor'] &&
+      data.status in ['active', 'pending', 'suspended'] &&
+      data.emailVerified is bool &&
+      data.canPublishArticles is bool &&
+      data.canEditArticles is bool &&
+      data.canDeleteArticles is bool &&
+      data.canManageCategories is bool &&
+      data.canManageSettings is bool &&
+      data.canManageUsers is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // Entity Validation Blueprint: AdminGrant
+    function isValidAdminGrant(data) {
+      return data.keys().hasAll(['uid', 'email', 'grantedBy', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'grantedBy', 'createdAt']) &&
+        isValidId(data.uid) &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 160 &&
+        isValidId(data.grantedBy) &&
+        data.createdAt is timestamp;
+    }
+
+    // Collection: /managed_users/{userId}
+    match /managed_users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && (
+        userId == request.auth.uid || isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.uid == request.auth.uid || isSuperAdminEmail()
+      );
+
+      allow create: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidManagedUser(incoming()) &&
+        incoming().id == userId &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Self-registration via Google OAuth (strictly pending contributor)
+          (
+            userId == request.auth.uid &&
+            incoming().uid == request.auth.uid &&
+            incoming().email == request.auth.token.email &&
+            incoming().role == 'contributor' &&
+            incoming().status == 'pending' &&
+            incoming().emailVerified == true &&
+            incoming().canPublishArticles == true &&
+            incoming().canEditArticles == false &&
+            incoming().canDeleteArticles == false &&
+            incoming().canManageCategories == false &&
+            incoming().canManageSettings == false &&
+            incoming().canManageUsers == false
+          ) ||
+          // Action 2: Verified Admin or Bootstrapped Super Admin creating user
+          isAdmin()
+        );
+
+      allow update: if isSignedIn() &&
+        isValidId(userId) &&
+        isValidManagedUser(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Owner updating only basic profile metadata (displayName, avatar, updatedAt) while not suspended
+          (
+            userId == request.auth.uid &&
+            existing().uid == request.auth.uid &&
+            existing().status != 'suspended' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'avatar', 'updatedAt'])
+          ) ||
+          // Action 2: Admin approving, suspending, or modifying RBAC permissions
+          isAdmin()
+        );
+
+      allow delete: if isSignedIn() && isValidId(userId) && isAdmin();
+    }
+
+    // Collection: /admins/{adminId}
+    match /admins/{adminId} {
+      allow get: if isSignedIn() && isValidId(adminId) && (
+        adminId == request.auth.uid || isAdmin()
+      );
+
+      allow list: if isSignedIn() && (
+        resource.data.uid == request.auth.uid || isSuperAdminEmail()
+      );
+
+      allow create: if isSignedIn() &&
+        isValidId(adminId) &&
+        isValidAdminGrant(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().grantedBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        isSuperAdminEmail();
+
+      allow update: if false;
+
+      allow delete: if isSignedIn() && isValidId(adminId) && isSuperAdminEmail();
+    }
+  }
+}
