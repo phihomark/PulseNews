@@ -191,6 +191,13 @@ export default function AppContent() {
 
         localStorage.setItem('tintuc_admin_session', JSON.stringify(syncedAdmin));
         setAdminUser(syncedAdmin);
+        setIsAdminLoginOpen(false);
+        const currentPath = window.location.pathname.replace(/^\//, '');
+        const currentHash = window.location.hash.replace(/^#\/?/, '');
+        if (currentPath === 'admin' || currentHash === 'admin') {
+          setSelectedArticle(null);
+          setIsAdminDashboardView(true);
+        }
       } catch (err) {
         console.warn('Error syncing Firebase Auth user:', err);
       }
@@ -243,6 +250,7 @@ export default function AppContent() {
       if (route === 'admin') {
         setSelectedArticle(null);
         if (adminUser) {
+          setIsAdminLoginOpen(false);
           setIsAdminDashboardView(true);
         } else {
           setIsAdminLoginOpen(true);
@@ -290,13 +298,24 @@ export default function AppContent() {
 
   // Admin Handlers
   const handleOpenAdmin = () => {
-    navigateTo('/admin');
+    if (adminUser) {
+      setIsAdminLoginOpen(false);
+      setSelectedArticle(null);
+      setIsAdminDashboardView(true);
+      window.history.pushState({}, '', '/admin');
+    } else {
+      navigateTo('/admin');
+    }
   };
 
   const handleAdminLoginSuccess = (user: AdminUser) => {
+    localStorage.setItem('tintuc_admin_session', JSON.stringify(user));
     setAdminUser(user);
     setIsAdminLoginOpen(false);
-    navigateTo('/admin');
+    setSelectedArticle(null);
+    setIsAdminDashboardView(true);
+    window.history.pushState({}, '', '/admin');
+    document.title = `Admin Portal - ${siteSettings.siteTitle}`;
   };
 
   const handleAdminLogout = async () => {
@@ -702,8 +721,13 @@ export default function AppContent() {
         />
 
         <AdminLogin
-          isOpen={isAdminLoginOpen}
-          onClose={() => setIsAdminLoginOpen(false)}
+          isOpen={isAdminLoginOpen && !adminUser}
+          onClose={() => {
+            setIsAdminLoginOpen(false);
+            if (!adminUser && window.location.pathname.replace(/^\//, '') === 'admin') {
+              navigateTo('/');
+            }
+          }}
           onLoginSuccess={handleAdminLoginSuccess}
         />
       </div>
